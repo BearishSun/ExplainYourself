@@ -1,0 +1,607 @@
+{
+  "name": "explain-yourself",
+  "displayName": "ExplainYourself",
+  "description": "AI-assisted code review helper tool: Claude explains your uncommitted changes category by category and flags code smells, and you stage hunks and lines as you accept them.",
+  "version": "0.1.0",
+  "publisher": "explainyourself",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/BearishSun/ExplainYourself.git"
+  },
+  "homepage": "https://github.com/BearishSun/ExplainYourself#readme",
+  "bugs": {
+    "url": "https://github.com/BearishSun/ExplainYourself/issues"
+  },
+  "icon": "media/logo.png",
+  "galleryBanner": {
+    "color": "#17123a",
+    "theme": "dark"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "SCM Providers",
+    "AI",
+    "Other"
+  ],
+  "keywords": [
+    "code review",
+    "review",
+    "claude",
+    "ai",
+    "git",
+    "staging",
+    "diff",
+    "stage lines",
+    "stage hunk"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -w -p .",
+    "test": "tsc -p . && node --test out/test/*.test.js",
+    "package": "vsce package --no-dependencies",
+    "test:integration": "tsc -p . && node scripts/integration.js",
+    "vscode:prepublish": "tsc -p .",
+    "publish": "vsce publish --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "~1.90.0",
+    "@vscode/test-electron": "^3.1.0",
+    "@vscode/vsce": "^3.0.0",
+    "typescript": "^5.6.0"
+  },
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "explainYourself",
+          "title": "ExplainYourself",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "explainYourself": [
+        {
+          "type": "webview",
+          "id": "explainYourself.review",
+          "name": "Review"
+        },
+        {
+          "id": "explainYourself.changes",
+          "name": "Changes",
+          "visibility": "collapsed"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "explainYourself.changes",
+        "contents": "No Git repository is open.\n[Open Repository…](command:explainYourself.openRepository)",
+        "when": "!explainYourself.hasRepository"
+      }
+    ],
+    "commands": [
+      {
+        "command": "explainYourself.openRepository",
+        "title": "Open Repository…",
+        "category": "ExplainYourself",
+        "icon": "$(folder-opened)"
+      },
+      {
+        "command": "explainYourself.refresh",
+        "title": "Refresh",
+        "category": "ExplainYourself",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "explainYourself.stageFile",
+        "title": "Stage File",
+        "category": "ExplainYourself",
+        "icon": "$(add)"
+      },
+      {
+        "command": "explainYourself.unstageFile",
+        "title": "Unstage File",
+        "category": "ExplainYourself",
+        "icon": "$(remove)"
+      },
+      {
+        "command": "explainYourself.stageAll",
+        "title": "Stage All Changes",
+        "category": "ExplainYourself",
+        "icon": "$(add)"
+      },
+      {
+        "command": "explainYourself.unstageAll",
+        "title": "Unstage All Changes",
+        "category": "ExplainYourself",
+        "icon": "$(remove)"
+      },
+      {
+        "command": "explainYourself.stageSelection",
+        "title": "Stage/Unstage Selected Lines (or Hunk at Cursor)",
+        "category": "ExplainYourself",
+        "icon": "$(diff-added)"
+      },
+      {
+        "command": "explainYourself.undo",
+        "title": "Undo Last Stage/Unstage",
+        "category": "ExplainYourself",
+        "icon": "$(discard)",
+        "enablement": "explainYourself.canUndo"
+      },
+      {
+        "command": "explainYourself.redo",
+        "title": "Redo Stage/Unstage",
+        "category": "ExplainYourself",
+        "icon": "$(redo)",
+        "enablement": "explainYourself.canRedo"
+      },
+      {
+        "command": "explainYourself.generate",
+        "title": "Generate Review",
+        "category": "ExplainYourself",
+        "icon": "$(sparkle)"
+      },
+      {
+        "command": "explainYourself.updateReview",
+        "title": "Update Review (Re-review Changed Files)",
+        "category": "ExplainYourself",
+        "icon": "$(sync)"
+      },
+      {
+        "command": "explainYourself.settings",
+        "title": "Display Settings…",
+        "category": "ExplainYourself",
+        "icon": "$(settings-gear)"
+      },
+      {
+        "command": "explainYourself.generateFromSession",
+        "title": "Generate Review from a Claude Session…",
+        "category": "ExplainYourself"
+      },
+      {
+        "command": "explainYourself.generateFresh",
+        "title": "Generate Review with a New Agent",
+        "category": "ExplainYourself"
+      },
+      {
+        "command": "explainYourself.useInSession",
+        "title": "Generate Review from Inside a Claude Session (/explain-yourself)",
+        "category": "ExplainYourself"
+      },
+      {
+        "command": "explainYourself.cancelGeneration",
+        "title": "Cancel Review Generation",
+        "category": "ExplainYourself"
+      },
+      {
+        "command": "explainYourself.selectSubmodules",
+        "title": "Select Submodules to Review…",
+        "category": "ExplainYourself"
+      },
+      {
+        "command": "explainYourself.setSubmodules",
+        "title": "Set Submodules to Review",
+        "category": "ExplainYourself"
+      },
+      {
+        "command": "explainYourself.showPrompt",
+        "title": "Show Last Prompt Sent to Claude",
+        "category": "ExplainYourself"
+      },
+      {
+        "command": "explainYourself.editReviewRules",
+        "title": "Edit Review Rules",
+        "category": "ExplainYourself"
+      },
+      {
+        "command": "explainYourself.stageUncovered",
+        "title": "Stage Changes Not Covered by the Review",
+        "category": "ExplainYourself"
+      },
+      {
+        "command": "explainYourself.stageSection",
+        "title": "Stage Section",
+        "category": "ExplainYourself",
+        "icon": "$(check)"
+      },
+      {
+        "command": "explainYourself.revealSection",
+        "title": "Show in Review Panel",
+        "category": "ExplainYourself",
+        "icon": "$(list-tree)"
+      },
+      {
+        "command": "explainYourself.toggleInline",
+        "title": "Toggle Inline / Side-by-Side Diff",
+        "category": "ExplainYourself",
+        "icon": "$(split-horizontal)"
+      },
+      {
+        "command": "explainYourself.compareSection",
+        "title": "Compare Old ↔ New",
+        "category": "ExplainYourself",
+        "icon": "$(versions)"
+      },
+      {
+        "command": "explainYourself.compareAtCursor",
+        "title": "Compare Old ↔ New Version of the Section at the Cursor",
+        "category": "ExplainYourself",
+        "icon": "$(versions)"
+      },
+      {
+        "command": "explainYourself.showAsDiff",
+        "title": "Show as Diff",
+        "category": "ExplainYourself",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "explainYourself.goToRelated",
+        "title": "Go to Related Section (Declaration ↔ Definition)",
+        "category": "ExplainYourself",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "explainYourself.togglePlainCompare",
+        "title": "Toggle Highlights in Old ↔ New Comparison",
+        "category": "ExplainYourself",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "explainYourself.account",
+        "title": "Claude Account…",
+        "category": "ExplainYourself",
+        "icon": "$(account)"
+      },
+      {
+        "command": "explainYourself.signIn",
+        "title": "Sign in to Claude",
+        "category": "ExplainYourself"
+      },
+      {
+        "command": "explainYourself.openSection",
+        "title": "Open Review Section",
+        "category": "ExplainYourself"
+      },
+      {
+        "command": "explainYourself.openDiff",
+        "title": "Open Diff",
+        "category": "ExplainYourself"
+      },
+      {
+        "command": "explainYourself.openDiffAt",
+        "title": "Open Diff at Line",
+        "category": "ExplainYourself"
+      },
+      {
+        "command": "explainYourself.stageHunk",
+        "title": "Stage Hunk",
+        "category": "ExplainYourself"
+      },
+      {
+        "command": "explainYourself.unstageHunk",
+        "title": "Unstage Hunk",
+        "category": "ExplainYourself"
+      },
+      {
+        "command": "explainYourself.stageCategory",
+        "title": "Stage Category",
+        "category": "ExplainYourself"
+      },
+      {
+        "command": "explainYourself.setToggle",
+        "title": "Set Highlight Toggle",
+        "category": "ExplainYourself"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "explainYourself.generateFromSession",
+          "when": "false"
+        },
+        {
+          "command": "explainYourself.generateFresh",
+          "when": "false"
+        },
+        {
+          "command": "explainYourself.useInSession",
+          "when": "false"
+        },
+        {
+          "command": "explainYourself.compareSection",
+          "when": "false"
+        },
+        {
+          "command": "explainYourself.openSection",
+          "when": "false"
+        },
+        {
+          "command": "explainYourself.openDiff",
+          "when": "false"
+        },
+        {
+          "command": "explainYourself.openDiffAt",
+          "when": "false"
+        },
+        {
+          "command": "explainYourself.stageHunk",
+          "when": "false"
+        },
+        {
+          "command": "explainYourself.unstageHunk",
+          "when": "false"
+        },
+        {
+          "command": "explainYourself.stageCategory",
+          "when": "false"
+        },
+        {
+          "command": "explainYourself.setToggle",
+          "when": "false"
+        },
+        {
+          "command": "explainYourself.stageSection",
+          "when": "false"
+        },
+        {
+          "command": "explainYourself.revealSection",
+          "when": "false"
+        },
+        {
+          "command": "explainYourself.stageFile",
+          "when": "false"
+        },
+        {
+          "command": "explainYourself.unstageFile",
+          "when": "false"
+        },
+        {
+          "command": "explainYourself.setSubmodules",
+          "when": "false"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "explainYourself.undo",
+          "when": "view == explainYourself.changes",
+          "group": "navigation@1"
+        },
+        {
+          "command": "explainYourself.redo",
+          "when": "view == explainYourself.changes",
+          "group": "navigation@2"
+        },
+        {
+          "command": "explainYourself.refresh",
+          "when": "view == explainYourself.changes",
+          "group": "navigation@3"
+        },
+        {
+          "command": "explainYourself.openRepository",
+          "when": "view == explainYourself.changes",
+          "group": "navigation@4"
+        },
+        {
+          "command": "explainYourself.undo",
+          "when": "view == explainYourself.review",
+          "group": "navigation@1"
+        },
+        {
+          "command": "explainYourself.redo",
+          "when": "view == explainYourself.review",
+          "group": "navigation@2"
+        },
+        {
+          "command": "explainYourself.toggleInline",
+          "when": "view == explainYourself.review",
+          "group": "navigation@3"
+        },
+        {
+          "command": "explainYourself.account",
+          "when": "view == explainYourself.review",
+          "group": "navigation@4"
+        },
+        {
+          "command": "explainYourself.settings",
+          "when": "view == explainYourself.review",
+          "group": "navigation@5"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "explainYourself.stageFile",
+          "when": "view == explainYourself.changes && viewItem == file-unstaged",
+          "group": "inline"
+        },
+        {
+          "command": "explainYourself.unstageFile",
+          "when": "view == explainYourself.changes && viewItem == file-staged",
+          "group": "inline"
+        },
+        {
+          "command": "explainYourself.stageAll",
+          "when": "view == explainYourself.changes && viewItem == group-unstaged",
+          "group": "inline"
+        },
+        {
+          "command": "explainYourself.unstageAll",
+          "when": "view == explainYourself.changes && viewItem == group-staged",
+          "group": "inline"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "explainYourself.stageSelection",
+          "when": "explainYourself.editorView",
+          "group": "navigation@-10"
+        },
+        {
+          "command": "explainYourself.undo",
+          "when": "explainYourself.editorView",
+          "group": "navigation@-9"
+        },
+        {
+          "command": "explainYourself.toggleInline",
+          "when": "explainYourself.editorView && !explainYourself.compareActive",
+          "group": "navigation@-8"
+        },
+        {
+          "command": "explainYourself.compareAtCursor",
+          "when": "explainYourself.reviewEditor && !explainYourself.compareActive",
+          "group": "navigation@-7"
+        },
+        {
+          "command": "explainYourself.showAsDiff",
+          "when": "explainYourself.compareActive",
+          "group": "navigation@-7"
+        },
+        {
+          "command": "explainYourself.goToRelated",
+          "when": "explainYourself.hasRelated",
+          "group": "navigation@-6.5"
+        },
+        {
+          "command": "explainYourself.togglePlainCompare",
+          "when": "explainYourself.compareActive",
+          "group": "navigation@-6"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "explainYourself.stageSelection",
+          "when": "explainYourself.editorView",
+          "group": "1_explainYourself@1"
+        },
+        {
+          "command": "explainYourself.undo",
+          "when": "explainYourself.editorView",
+          "group": "1_explainYourself@2"
+        }
+      ],
+      "comments/commentThread/title": [
+        {
+          "command": "explainYourself.stageSection",
+          "when": "commentController == explainYourself && commentThread != explainYourselfNote",
+          "group": "inline@1"
+        },
+        {
+          "command": "explainYourself.compareSection",
+          "when": "commentController == explainYourself && commentThread != explainYourselfNote",
+          "group": "inline@2"
+        },
+        {
+          "command": "explainYourself.goToRelated",
+          "when": "commentController == explainYourself && commentThread == explainYourselfGrouped",
+          "group": "inline@3"
+        },
+        {
+          "command": "explainYourself.revealSection",
+          "when": "commentController == explainYourself && commentThread != explainYourselfNote",
+          "group": "inline@4"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "explainYourself.goToRelated",
+        "key": "ctrl+alt+o",
+        "mac": "cmd+alt+o",
+        "when": "editorTextFocus && explainYourself.hasRelated"
+      },
+      {
+        "command": "explainYourself.stageSelection",
+        "key": "ctrl+alt+s",
+        "mac": "cmd+alt+s",
+        "when": "editorTextFocus && explainYourself.editorView"
+      },
+      {
+        "command": "explainYourself.undo",
+        "key": "ctrl+alt+z",
+        "mac": "cmd+alt+z",
+        "when": "explainYourself.editorView || focusedView == explainYourself.changes || focusedView == explainYourself.review"
+      },
+      {
+        "command": "explainYourself.redo",
+        "key": "ctrl+alt+y",
+        "mac": "cmd+alt+shift+z",
+        "when": "explainYourself.editorView || focusedView == explainYourself.changes || focusedView == explainYourself.review"
+      }
+    ],
+    "configuration": {
+      "title": "ExplainYourself",
+      "properties": {
+        "explainYourself.claudePath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the claude executable. Empty: search PATH and the default install locations."
+        },
+        "explainYourself.gitPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the git executable. Empty: use git from PATH."
+        },
+        "explainYourself.model": {
+          "type": "string",
+          "default": "claude-sonnet-5-5",
+          "description": "Model for review generation and updates, for example \"claude-sonnet-5-5\", \"sonnet\" or \"opus\". Empty: the Claude Code default."
+        },
+        "explainYourself.sessionSearchDays": {
+          "type": "number",
+          "default": 14,
+          "description": "How many days of Claude Code session transcripts to search for the session that wrote the changes."
+        },
+        "explainYourself.diffAlgorithm": {
+          "type": "string",
+          "enum": [
+            "histogram",
+            "patience",
+            "myers",
+            "minimal"
+          ],
+          "default": "histogram",
+          "description": "Diff algorithm used to compute hunks."
+        },
+        "explainYourself.showSummaries": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show section summaries inline in diffs."
+        },
+        "explainYourself.summariesExpanded": {
+          "type": "boolean",
+          "default": true,
+          "description": "Expand inline section summaries by default."
+        },
+        "explainYourself.codeLens": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show \"Stage hunk\" / \"Unstage hunk\" CodeLenses in diffs."
+        },
+        "explainYourself.openRewritesSideBySide": {
+          "type": "boolean",
+          "default": true,
+          "description": "Open mostly rewritten sections as their complete old and new versions side by side instead of as a diff."
+        },
+        "explainYourself.plainCompare": {
+          "type": "boolean",
+          "default": false,
+          "description": "Hide highlights, summaries and CodeLenses in the old ↔ new comparison."
+        },
+        "explainYourself.stageFromEditors": {
+          "type": "boolean",
+          "default": false,
+          "description": "Also allow staging, and show hunk CodeLenses, in plain editors of repository files."
+        }
+      }
+    }
+  }
+}

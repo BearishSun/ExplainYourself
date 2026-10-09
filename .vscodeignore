@@ -1,0 +1,12 @@
+src/**
+scripts/**
+docs/**
+out/test/**
+out/integration/**
+**/*.map
+tsconfig.json
+.gitignore
+node_modules/**
+*.vsix
+.vscode-test/**
+media/logo.svg

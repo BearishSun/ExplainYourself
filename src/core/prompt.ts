@@ -1,0 +1,244 @@
+import { ChangeSet } from './changes';
+import { ReviewGuidance } from './guidance';
+import { SessionCandidate } from './sessions';
+
+export type PromptMode =
+	| { kind: 'fresh'; sessions: SessionCandidate[] }
+	| { kind: 'session' }
+	| { kind: 'skill'; outputFile: string; submitCommand: string };
+
+function fileList(changes: ChangeSet): string {
+	return changes.files
+		.map((f) => `- ${f.path} (${f.status}${f.oldPath ? ` from ${f.oldPath}` : ''}, +${f.added} -${f.removed})`)
+		.join('\n');
+}
+
+function sessionBlock(mode: PromptMode): string {
+	if (mode.kind === 'session') {
+		return [
+			'## Context from this session',
+			'You are continuing the Claude Code session in which (at least some of) these changes were made.',
+			'Use what you know from the conversation about intent, requirements and design decisions.',
+			'The code may have changed after the conversation: describe the code as it is now, and verify every claim against the files.',
+			'Set sourceSession to the id of this session if you know it.'
+		].join('\n');
+	}
+
+	if (mode.kind === 'skill') {
+		return [
+			'## Context from this session',
+			'Use what you know from this conversation about intent, requirements and design decisions behind the changes.',
+			'The code may contain changes made outside this conversation: describe the code as it is now, and verify every claim against the files.'
+		].join('\n');
+	}
+
+	if (mode.sessions.length === 0) {
+		return [
+			'## Context from earlier sessions',
+			'No recent Claude Code session transcript edited these files. Derive intent from the code, commit history (git log) and comments only.'
+		].join('\n');
+	}
+
+	const list = mode.sessions
+		.slice(0, 8)
+		.map((s) => {
+			const files = Object.entries(s.editedFiles)
+				.map(([f, n]) => `${f} x${n}`)
+				.join(', ');
+			return `- ${s.transcript}\n  session ${s.sessionId}, last active ${s.lastActive.toISOString()}, first prompt: "${s.title}"\n  edited: ${files}`;
+		})
+		.join('\n');
+	return [
+		'## Context from earlier sessions',
+		'These Claude Code session transcripts edited files in this change set (most relevant first). Each is a JSONL file with one event per line; they can be very large.',
+		list,
+		'Search them with Grep (for example for a changed file name or a distinctive identifier) and read the surrounding user and assistant messages.',
+		'Look for the user requests, requirements and design decisions behind the changes. Do not read transcripts end to end.',
+		'Transcripts can describe intermediate states that were later reverted: describe the code as it is now.',
+		'Set sourceSession to the id of the session that produced most of the changes.'
+	].join('\n');
+}
+
+/** Tells the agent which paths are inside submodules, which are separate repositories. */
+function submoduleNote(changes: ChangeSet): string {
+	if (changes.submodules.length === 0) {
+		return '';
+	}
+	return `- Submodules included in the change set: ${changes.submodules.map((m) => `"${m}"`).join(', ')}. Each is a separate git repository inside this one. The annotated diff already contains their changes, with paths starting at the submodule path; use those full paths in sections. To run git for a submodule, use \`git -C "<submodule path>"\`.
+`;
+}
+
+const READING_ORDER = `## Reading order
+Order the categories, and the sections within each category, so the reviewer can read them from first to last and understand each one with what they have already read.
+- By default, go bottom-up: start with utilities and low-level code that depends on nothing else in the change set and can be judged on its own, then build up layer by layer to the code that uses it.
+- Go top-down instead when a lower layer only makes sense once the reviewer has seen how the layer above uses it, for example a small interface whose purpose is only clear from its caller. Then start with the higher layer and drill down.
+- Within a category, put declarations next to their definitions, and supporting types before the code that uses them.
+- Tests always get their own category, never mixed into a category with production code, and come last, after all production code. Many reviewers skip them. Use one tests category, or a few when the tests cover clearly separate areas.`;
+
+/** Rules the agent checks the changes against, and how to report what it finds. */
+function reviewChecks(guidance: ReviewGuidance): string {
+	const instructions =
+		guidance.instructions.length > 0
+			? `
+
+### Project instructions
+The repository has instructions for coding agents that apply to these changes:
+${guidance.instructions.map((f) => `- ${f}`).join('\n')}
+Read them. Flag changes that break the conventions they state, with the tag "Convention".`
+			: '';
+	return `## Review checks
+Besides explaining the changes, report review findings: what a careful reviewer would push back on. A finding about the code of one section goes into that section's concerns; a finding that spans sections or concerns the whole category goes into the category's concerns.
+
+${guidance.rules}${instructions}
+
+### Reporting findings
+- tag: the tag of the rule the finding belongs to, as written in the rules.
+- text: name the file and function, say why it is a problem, and give the cleaner alternative in one sentence. Markdown, one or two sentences.
+- Order the findings of each section and category by importance, most important first.
+- Flag only concrete problems in the changed code. Report a problem in unchanged code only when the change extends it.
+- Look for findings actively while reading the code, but omit concerns where you find nothing. Do not invent issues.`;
+}
+
+const INTRO = `You are preparing a guided code review. A human reviewer will read your categories and summaries next to the diff and stage each change once they understand and accept it.
+
+Assume the reviewer is a competent engineer who is completely unfamiliar with this code. Explain the role of each component and domain term on first mention. Prefer concrete statements ("Load() now retries three times before failing") over vague ones ("improves robustness").
+
+All text fields are rendered as Markdown. Wrap every code identifier, type, file name, setting, command and literal value in backticks, for example \`GpuDevice::EndFrame()\` or \`gpu.TransientIdleFrames\`. Use "- " bullet lists for enumerations of three or more items, and separate paragraphs with a blank line.`;
+
+const CATEGORY_RULES = `   - title: a short noun phrase.
+   - oldBehavior: what the affected code did before the change. Name the components involved and their role. For new functionality, say what was missing.
+   - newBehavior: what the code does after the change, and why it changed.
+   - concerns (optional): review findings (see "Review checks") that do not belong to a single section, for example duplication between two sections or an architectural problem of the whole category.
+   - sections: the regions of code the reviewer must read to understand the category.`;
+
+const SECTION_RULES = `   - A section is a region of code that is meaningful for understanding the change, not only the changed lines. When a function changed meaningfully, mark the whole function so the reviewer reads the new version as a unit. When only a small part of a large function changed, mark that part plus the smallest enclosing construct needed to understand it (a branch, a loop, a block).
+   - A method or function whose implementation is longer than 30 lines always gets a section of its own. Never put other code, such as a neighbouring method, in the same section.
+   - newStart/newEnd: 1-based inclusive lines in the working tree version (the "new" column). Required unless the section covers removed code only.
+   - oldStart/oldEnd: 1-based inclusive lines in the HEAD version (the "old" column). Give them when removed or replaced code matters for understanding, for example a deleted or rewritten function. Otherwise omit them.
+   - layout (optional): set "rewrite" when most of the region (typically a whole function) was rewritten, so that reading the complete old version and then the complete new version is easier than reading the diff. The reviewer then sees the two versions side by side without diff markup. Give newStart/newEnd for the whole new function, and oldStart/oldEnd for the whole old function when you know them exactly; when you omit the old range, it is derived from the new range. Omit layout for regions where the diff is easy to follow.
+   - group (optional): a name shared by sections that show parts of one entity in different places, so the reviewer can jump between them. The main case is a declaration and its definition, for example a method added to a header and its implementation in the source file: give both sections the qualified name, such as "GpuDevice::EndFrame". Put grouped sections in the same category, give each part its own section, and do not group code only because one part calls the other.
+   - effort: how hard the section is to review. "low": mechanical or obvious code, such as renames, plumbing, simple accessors or boilerplate. "medium": ordinary logic that needs reading but holds no surprises. "high": code where mistakes hide, such as concurrency, lifetimes, memory, error handling or subtle invariants. Judge the difficulty, not the length.
+   - notes (optional): for a section that covers a method or function longer than 60 lines made of several distinct parts (for example argument checks, setup, the main loop, cleanup), add one note per part. line is the first working tree line of the part, inside the section; text is one or two sentences on what the part does. The reviewer sees each note as a comment above its part in the diff, not in the review panel. Do not add notes to shorter code, and do not repeat the summary.
+   - concerns (optional): review findings (see "Review checks") about the code in this section. The reviewer sees a warning icon next to the section and reads them on hover.
+   - summary: 1-4 sentences on what this region does now and what changed in it, written for someone who has not seen it before. Mention the old behavior where it differs.
+   - file: repository-relative path with forward slashes. Sections can point at unchanged files when a short piece of unchanged code is necessary to understand the change (for example a type definition), but keep those rare.
+   - Every changed line ("-" or "+") must belong to at least one section. Each changed line should belong to only one category where possible.
+   - Take line numbers from the annotated diff or from reading the files. Never estimate them. Use Read on the working tree file to find the exact start and end of a function.`;
+
+/** Builds the instructions for the review agent. */
+export function buildPrompt(root: string, changes: ChangeSet, mode: PromptMode, guidance: ReviewGuidance): string {
+	const output =
+		mode.kind === 'skill'
+			? [
+					'## Output',
+					`Write the review as one JSON object to: ${mode.outputFile}`,
+					'The object must match this shape (TypeScript notation; "?" marks optional fields):',
+					'{ title: string; overview: string; sourceSession?: string; categories: { title: string; oldBehavior: string; newBehavior: string; concerns?: { tag: string; text: string }[];',
+					'  sections: { file: string; title: string; summary: string; newStart?: number; newEnd?: number; oldStart?: number; oldEnd?: number; layout?: "rewrite"; group?: string; effort?: "low" | "medium" | "high"; notes?: { line: number; text: string }[]; concerns?: { tag: string; text: string }[] }[] }[] }',
+					`Then run: ${mode.submitCommand}`,
+					'It validates the file and loads it into the ExplainYourself extension. Fix any reported errors and run it again.'
+				].join('\n')
+			: '## Output\nReturn the review as structured output matching the provided JSON schema.';
+
+	return `${INTRO}
+
+## Inputs
+- Repository root: ${root}
+- Annotated diff of all changes from HEAD to the working tree (staged, unstaged and untracked files): ${changes.annotatedPath}
+  Each file starts with "=== FILE: <path>". Each line shows the old line number (HEAD), the new line number (working tree), a marker (" " context, "-" removed, "+" added) and the text.
+${submoduleNote(changes)}- Changed files:
+${fileList(changes)}
+
+${sessionBlock(mode)}
+
+## What to produce
+1. categories: group all changes into logical categories that can be reviewed and judged separately: a feature, a bug fix, a refactor, a rename sweep, test updates, build configuration, and so on. Use as few categories as make sense; a small change set can have one. Order the categories for the easiest reading; see "Reading order" below.
+2. For each category:
+${CATEGORY_RULES}
+3. For each section:
+${SECTION_RULES}
+4. title: one line, at most about 80 characters, naming what the change set does, for example "Transient heap pools and GPU memory aliasing".
+5. overview: 2-5 sentences that describe the whole change set.
+
+${READING_ORDER}
+
+${reviewChecks(guidance)}
+
+## Rules
+- Read the annotated diff completely before writing anything. Read surrounding code and callers where needed.
+- Do not modify any source files.${mode.kind === 'skill' ? ' The only file you write is the review JSON named below.' : ''}
+
+${output}
+`;
+}
+
+export interface UpdatedFile {
+	path: string;
+	reason: 'modified' | 'added' | 'removed';
+}
+
+export type UpdateMode = { kind: 'resumed' } | { kind: 'fresh' } | { kind: 'skill'; outputFile: string; submitCommand: string };
+
+const REASON_TEXT: Record<UpdatedFile['reason'], string> = {
+	modified: 'changed since the previous review',
+	added: 'newly part of the change set',
+	removed: 'no longer changed; drop its sections'
+};
+
+/** Builds the instructions for updating an existing review after the code changed. */
+export function buildUpdatePrompt(root: string, changes: ChangeSet, reviewFile: string, files: UpdatedFile[], mode: UpdateMode, guidance: ReviewGuidance): string {
+	const context =
+		mode.kind === 'resumed'
+			? 'You wrote the previous review earlier in this session. The code changed since then.'
+			: 'A previous review of this change set exists. The code changed since it was written.';
+	const output =
+		mode.kind === 'skill'
+			? [
+					'## Output',
+					`Write the update as one JSON object to: ${mode.outputFile}`,
+					'Shape (TypeScript notation; "?" marks optional fields):',
+					'{ title?: string; overview?: string; categories: { id?: string; before?: string; title: string; oldBehavior: string; newBehavior: string; concerns?: { tag: string; text: string }[];',
+					'  sections: { file: string; title: string; summary: string; newStart?: number; newEnd?: number; oldStart?: number; oldEnd?: number; layout?: "rewrite"; group?: string; effort?: "low" | "medium" | "high"; notes?: { line: number; text: string }[]; concerns?: { tag: string; text: string }[] }[] }[] }',
+					`Then run: ${mode.submitCommand}`,
+					'It validates the update, merges it into the review and loads it into the ExplainYourself extension. Fix any reported errors and run it again.'
+				].join('\n')
+			: '## Output\nReturn the update as structured output matching the provided JSON schema.';
+
+	return `${INTRO}
+
+${context} Update the review for the files listed below only. Sections of all other files stay exactly as they are, and their line numbers are still correct.
+
+## Inputs
+- Repository root: ${root}
+- Previous review (JSON; categories have ids, sections have newRange/oldRange line ranges): ${reviewFile}
+- Regenerated annotated diff of the complete current change set (HEAD -> working tree): ${changes.annotatedPath}
+  Each file starts with "=== FILE: <path>". Each line shows the old line number (HEAD), the new line number (working tree), a marker (" " context, "-" removed, "+" added) and the text.
+${submoduleNote(changes)}- Files to re-review:
+${files.map((f) => `- ${f.path} (${REASON_TEXT[f.reason]})`).join('\n')}
+
+## What to produce
+1. categories: list each category that gains, keeps or loses sections of the files above.
+   - To update an existing category, give its "id" from the previous review. Write title, oldBehavior, newBehavior and concerns so they describe the whole category after the update, including the sections you do not touch.
+   - Give sections only for the files above. They replace every previous section of those files in that category.
+   - Categories you leave out keep their text, but lose their sections of the files above.
+   - Add a new category, without an id, when a change does not fit an existing one. Give "before" with the id of the existing category it should precede in reading order; without it, the category goes last.
+   - A category left without sections is removed.
+   - Sections you write take the place of the previous sections of the same file in that category. To put a section elsewhere, give "before" with the id of the existing section it should precede.
+2. Category fields:
+${CATEGORY_RULES}
+3. For each section:
+${SECTION_RULES}
+4. title and overview (optional): the updated one-line title and overview of the whole change set, when the update changes them.
+
+${READING_ORDER}
+
+${reviewChecks(guidance)}
+
+## Rules
+- Read the previous review and the parts of the annotated diff for the files above before writing anything.
+- Keep the group names of the previous review for entities that still exist, so that sections of other files stay grouped with the ones you write.
+- Do not modify any source files.${mode.kind === 'skill' ? ' The only file you write is the update JSON named below.' : ''}
+
+${output}
+`;
+}

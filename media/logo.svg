@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+	<defs>
+		<linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+			<stop offset="0" stop-color="#ff8a3d"/>
+			<stop offset="1" stop-color="#e0336b"/>
+		</linearGradient>
+		<clipPath id="leftEye"><ellipse cx="88" cy="92" rx="34" ry="27"/></clipPath>
+		<clipPath id="rightEye"><ellipse cx="168" cy="88" rx="34" ry="31"/></clipPath>
+	</defs>
+	<rect x="8" y="8" width="240" height="240" rx="56" fill="url(#bg)"/>
+
+	<!-- Eyes giving the diff a side-eye: the left one squints under a lowered lid, the right one stares. -->
+	<g clip-path="url(#leftEye)">
+		<ellipse cx="88" cy="92" rx="34" ry="27" fill="#ffffff"/>
+		<circle cx="104" cy="100" r="14" fill="#2a1430"/>
+		<circle cx="109" cy="95" r="4" fill="#ffffff"/>
+		<rect x="40" y="56" width="100" height="24" fill="#f9734c"/>
+	</g>
+	<ellipse cx="88" cy="92" rx="34" ry="27" fill="none" stroke="#2a1430" stroke-width="6"/>
+	<path d="M56 80 L120 80" stroke="#2a1430" stroke-width="6" stroke-linecap="round"/>
+
+	<g clip-path="url(#rightEye)">
+		<ellipse cx="168" cy="88" rx="34" ry="31" fill="#ffffff"/>
+		<circle cx="184" cy="98" r="14" fill="#2a1430"/>
+		<circle cx="189" cy="93" r="4" fill="#ffffff"/>
+	</g>
+	<ellipse cx="168" cy="88" rx="34" ry="31" fill="none" stroke="#2a1430" stroke-width="6"/>
+
+	<!-- Eyebrows: one flat and stern, one raised high. -->
+	<path d="M54 58 L122 66" stroke="#2a1430" stroke-width="11" stroke-linecap="round"/>
+	<path d="M134 42 Q164 18 204 38" fill="none" stroke="#2a1430" stroke-width="11" stroke-linecap="round"/>
+
+	<!-- The diff under suspicion. -->
+	<rect x="44" y="140" width="168" height="84" rx="16" fill="#2a1430" fill-opacity="0.88"/>
+	<rect x="56" y="152" width="144" height="18" rx="6" fill="#f2564b" fill-opacity="0.28"/>
+	<rect x="62" y="159" width="10" height="4" rx="2" fill="#ff7a70"/>
+	<rect x="82" y="155" width="84" height="11" rx="5.5" fill="#ff7a70"/>
+	<rect x="56" y="174" width="144" height="18" rx="6" fill="#4cc779" fill-opacity="0.28"/>
+	<rect x="62" y="181" width="10" height="4" rx="2" fill="#5fe08e"/>
+	<rect x="65" y="178" width="4" height="10" rx="2" fill="#5fe08e"/>
+	<rect x="82" y="177" width="104" height="11" rx="5.5" fill="#5fe08e"/>
+	<rect x="56" y="196" width="144" height="18" rx="6" fill="#4cc779" fill-opacity="0.28"/>
+	<rect x="62" y="203" width="10" height="4" rx="2" fill="#5fe08e"/>
+	<rect x="65" y="200" width="4" height="10" rx="2" fill="#5fe08e"/>
+	<rect x="82" y="199" width="62" height="11" rx="5.5" fill="#5fe08e"/>
+</svg>
