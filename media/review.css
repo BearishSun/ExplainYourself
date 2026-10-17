@@ -18,6 +18,10 @@ a:hover { text-decoration: underline; }
 .muted { color: var(--vscode-descriptionForeground); }
 .small { font-size: 0.9em; }
 .warn { color: var(--vscode-editorWarning-foreground); }
+/* Files changed since the review: a count, expandable to one file per line. */
+.stale { margin: 4px 0; }
+.stale > summary { cursor: pointer; }
+.stale-file { padding-left: 14px; overflow-wrap: anywhere; color: var(--vscode-descriptionForeground); }
 
 button {
 	background: var(--vscode-button-background);
@@ -74,8 +78,6 @@ pre.err { white-space: pre-wrap; color: var(--vscode-errorForeground); margin: 4
 	padding: 8px 10px 6px;
 	background: var(--vscode-sideBar-background);
 	border-bottom: 1px solid var(--vscode-panel-border);
-	--sq-pending: var(--vscode-editorWarning-foreground, #cca700);
-	--sq-staged: var(--vscode-testing-iconPassed, #3c3);
 }
 .progress-strip[hidden] { display: none; }
 /* Column, row, gap and corner sizes are set by layoutSquares() in whole device pixels. */
@@ -83,14 +85,14 @@ pre.err { white-space: pre-wrap; color: var(--vscode-errorForeground); margin: 4
 .sq {
 	cursor: pointer;
 	border-radius: var(--sq-radius, 3px);
-	/* Pending: a soft tint with a crisp ring. Staged: solid, with a faint top highlight. */
-	background: color-mix(in srgb, var(--sq-pending) 28%, transparent);
-	box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--sq-pending) 70%, transparent);
+	/* Colored by size like the pills. Pending: a soft tint with a crisp ring. Staged: solid, with a faint top highlight. */
+	background: color-mix(in srgb, var(--sq-color) 28%, transparent);
+	box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--sq-color) 70%, transparent);
 	transition: background-color 0.35s ease, box-shadow 0.35s ease, transform 0.12s ease;
 }
 .sq.staged {
-	background: var(--sq-staged) linear-gradient(to bottom, rgba(255, 255, 255, 0.18), rgba(255, 255, 255, 0));
-	box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--sq-staged) 80%, black);
+	background: var(--sq-color) linear-gradient(to bottom, rgba(255, 255, 255, 0.18), rgba(255, 255, 255, 0));
+	box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--sq-color) 80%, black);
 	animation: sq-done 0.4s ease-out;
 }
 .sq:hover {
@@ -120,19 +122,20 @@ details.category.done .cat-title { color: var(--vscode-descriptionForeground); t
 
 .section { border-left: 3px solid var(--vscode-editorWarning-foreground); padding: 4px 0 4px 8px; margin: 6px 0; }
 .section.staged { border-left-color: var(--vscode-testing-iconPassed, #3c3); }
-/* Staged sections recede, but their effort pills and warning icons keep full color. */
-.section.staged > :not(.section-head), .section.staged .section-title, .section.staged .badge { opacity: 0.75; }
+/* Staged sections recede, but their size pills and warning icons keep full color. */
+.section.staged > :not(.section-head), .section.staged .section-title { opacity: 0.75; }
 .section.context { border-left-color: var(--vscode-panel-border); }
 .section.flash { animation: flash 1.5s ease-out; }
 @keyframes flash { from { background: var(--vscode-editor-findMatchHighlightBackground); } to { background: transparent; } }
 .section-head { display: flex; align-items: center; gap: 6px; }
-/* Name, effort pill, warning icon and badges flow as one line of text, so they follow the last word of a wrapped title. */
+/* Name, size pill and warning icon flow as one line of text, so they follow the last word of a wrapped title. */
 .section-name { flex: 1; min-width: 0; }
 .section-name > * + * { margin-left: 6px; }
 .section-title { font-weight: 600; }
-.section-name .effort, .section-name .badge { display: inline-block; vertical-align: 1px; }
-.warn { display: inline-block; vertical-align: -2px; color: var(--vscode-editorWarning-foreground, #cca700); cursor: help; line-height: 0; }
-.warn:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
+.section-name .effort, .cat-title .effort { display: inline-block; vertical-align: 1px; }
+.cat-title .effort { margin-left: 6px; }
+.concern-icon { display: inline-block; vertical-align: -2px; color: var(--vscode-editorWarning-foreground, #cca700); cursor: help; line-height: 0; }
+.concern-icon:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
 #concern-tip {
 	display: none;
 	position: fixed;
@@ -165,7 +168,7 @@ details.category.done .cat-title { color: var(--vscode-descriptionForeground); t
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--vscode-editorWarning-foreground); flex-shrink: 0; }
 .staged .dot { background: var(--vscode-testing-iconPassed, #3c3); }
 .context .dot { background: var(--vscode-descriptionForeground); }
-/* Effort pill: changed line count, colored by review difficulty. */
+/* Size pill: changed line count, colored by size. */
 .effort {
 	flex-shrink: 0;
 	min-width: 14px;
@@ -179,11 +182,19 @@ details.category.done .cat-title { color: var(--vscode-descriptionForeground); t
 	color: #1e1e1e;
 }
 /* Fixed colors: theme chart colors can be dark and muddy, and staged sections are drawn translucent. */
-.effort-low { background: #4cc779; }
-.effort-medium { background: #f5b730; }
-.effort-high { background: #f2564b; color: #fff; }
+/* One color per size class, shared by the pills and the progress squares. */
+:root { --size-low: #4cc779; --size-medium: #f5b730; --size-high: #f2564b; --size-huge: #d94fd5; }
+.effort-low { background: var(--size-low); }
+.effort-medium { background: var(--size-medium); }
+.effort-high { background: var(--size-high); color: #fff; }
+.effort-huge { background: var(--size-huge); color: #fff; }
+.sq.size-low { --sq-color: var(--size-low); }
+.sq.size-medium { --sq-color: var(--size-medium); }
+.sq.size-high { --sq-color: var(--size-high); }
+.sq.size-huge { --sq-color: var(--size-huge); }
 .summary { margin-top: 2px; }
 .related { margin-top: 2px; }
 .uncovered > div { margin: 2px 0; }
 .badge { font-size: 0.8em; padding: 0 5px; border-radius: 8px; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); }
 .views { float: right; }
+.nearby { cursor: help; }

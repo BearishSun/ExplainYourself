@@ -3,9 +3,11 @@ import * as path from 'path';
 import { AgentProgress, AgentRun, runAgent } from './agent';
 import { buildChangeSet, ChangeSet } from './changes';
 import { git } from './exec';
+import { snapSections } from './coverage';
 import { buildPrompt, buildUpdatePrompt, UpdatedFile, UpdateMode } from './prompt';
 import { computeFingerprints, countFileLines, saveSnapshots, loadReview, mergeUpdate, normalizeReview, Review, reviewDir, reviewPath, saveReview, UPDATE_SCHEMA } from './review';
 import { loadGuidance } from './guidance';
+import { needsAgent, planUpdate, renderUpdate, UpdatePlan } from './update';
 import { findSessions, SessionCandidate } from './sessions';
 import { Workspace } from './workspace';
 
@@ -38,14 +40,16 @@ function lineCounter(repo: Workspace) {
 	return (file: string) => countFileLines(repo.absPath(file));
 }
 
-/** Records what the review covers (change set, file fingerprints and snapshots) and saves it. */
+/** Records what the review covers (change set, file fingerprints and copies of the reviewed files) and saves it. */
 async function saveWithSnapshot(repo: Workspace, changes: ChangeSet, review: Review): Promise<void> {
 	review.files = changes.files.map((f) => f.path);
 	review.submodules = repo.selectedSubmodules.length > 0 ? repo.selectedSubmodules : undefined;
 	review.submoduleHeads = repo.selectedSubmodules.length > 0 ? repo.submoduleHeads() : undefined;
 	const sectionFiles = review.categories.flatMap((c) => c.sections.map((s) => s.file));
 	review.fingerprints = await computeFingerprints(repo.root, [...review.files, ...sectionFiles]);
-	await saveSnapshots(repo.gitDir, repo.root, sectionFiles, review.fingerprints);
+	// Copies of all changed text files, so later updates can tell exactly what was edited since.
+	const textFiles = changes.files.filter((f) => f.status !== 'binary' && f.status !== 'deleted').map((f) => f.path);
+	await saveSnapshots(repo.gitDir, repo.root, [...sectionFiles, ...textFiles], review.fingerprints);
 	await saveReview(repo.gitDir, review);
 }
 
@@ -55,18 +59,19 @@ export async function finishReview(repo: Workspace, changes: ChangeSet, raw: unk
 	if (errors.length > 0) {
 		throw new Error(`The review is invalid:\n${errors.join('\n')}`);
 	}
+	warnings.push(...snapSections(review, changes.diffs));
 	await saveWithSnapshot(repo, changes, review);
 	return { review, warnings };
 }
 
-/** Merges raw update output into the previous review and saves it. Throws when the output is unusable. */
-export async function finishUpdate(repo: Workspace, changes: ChangeSet, previous: Review, raw: unknown, files: UpdatedFile[], source: Review['source']): Promise<GenerateResult> {
-	const changed = new Set(files.map((f) => f.path));
-	const { review, errors, warnings } = await mergeUpdate(previous, raw, changed, { head: repo.head, source, lineCount: lineCounter(repo) });
+/** Merges raw update output into the planned base review and saves it. Throws when the output is unusable. */
+export async function finishUpdate(repo: Workspace, changes: ChangeSet, plan: UpdatePlan, raw: unknown, source: Review['source']): Promise<GenerateResult> {
+	const { review, errors, warnings } = await mergeUpdate(plan.base, raw, plan.wholeFiles, { head: repo.head, source, lineCount: lineCounter(repo) });
 	if (errors.length > 0) {
 		throw new Error(`The review update is invalid:\n${errors.join('\n')}`);
 	}
 	review.source = source;
+	warnings.push(...snapSections(review, changes.diffs));
 	await saveWithSnapshot(repo, changes, review);
 	return { review, warnings };
 }
@@ -112,7 +117,7 @@ export async function reviewDelta(repo: Workspace, review: Review, changes: Chan
 		} else if (!current.has(file) && previous.has(file)) {
 			result.push({ path: file, reason: 'removed' });
 		} else if (fingerprints[file] !== review.fingerprints[file] || headChanged.has(file)) {
-			result.push({ path: file, reason: 'modified' });
+			result.push({ path: file, reason: 'modified', ...(headChanged.has(file) ? { headMoved: true } : {}) });
 		}
 	}
 	return result;
@@ -179,12 +184,31 @@ export async function generateReview(repo: Workspace, options: GenerateOptions):
 	});
 }
 
-/** Re-reviews only the files that changed since the review, continuing the review agent's session when possible. */
+/**
+ * Updates the review for the edits made since it was written, continuing the review agent's session when
+ * possible. Only sections the edits touch, and edited code no section covers, go to the agent; the other
+ * sections keep their text and move with the edits.
+ */
 async function updateReview(repo: Workspace, changes: ChangeSet, previous: Review, files: UpdatedFile[], options: GenerateOptions): Promise<GenerateResult> {
 	if (files.length === 0) {
 		options.onProgress({ kind: 'status', message: 'The review is up to date.' });
 		return { review: previous, warnings: [], upToDate: true };
 	}
+
+	const plan = await planUpdate(repo, previous, files, changes);
+	if (!needsAgent(plan)) {
+		options.onProgress({ kind: 'status', message: 'The edits touch no reviewed code; moving the sections along with them.' });
+		return finishUpdate(repo, changes, plan, { categories: [] }, previous.source);
+	}
+	const updateFile = path.join(reviewDir(repo.gitDir), 'update.md');
+	writeFileSync(updateFile, renderUpdate(plan, changes));
+	const scope = [
+		plan.affected.size > 0 ? `${plan.affected.size} section(s)` : '',
+		plan.uncovered.length > 0 ? `${plan.uncovered.length} new edit(s)` : '',
+		plan.wholeFiles.size > 0 ? `${plan.wholeFiles.size} whole file(s)` : ''
+	]
+		.filter(Boolean)
+		.join(', ');
 
 	const guidance = await loadGuidance(repo.root, files.map((f) => f.path));
 	const run = async (resume: boolean) => {
@@ -192,13 +216,13 @@ async function updateReview(repo: Workspace, changes: ChangeSet, previous: Revie
 		const mode: UpdateMode = resume ? { kind: 'resumed' } : { kind: 'fresh' };
 		options.onProgress({
 			kind: 'status',
-			message: `${resume ? 'Resuming the review session' : 'Starting a new review agent'} to re-review ${files.length} file(s)…`
+			message: `${resume ? 'Resuming the review session' : 'Starting a new review agent'} to review ${scope}…`
 		});
 		const agent = runAgent({
 			claudePath: options.claudePath,
 			cwd,
 			repoRoot: repo.root,
-			prompt: savePrompt(repo, buildUpdatePrompt(repo.root, changes, reviewPath(repo.gitDir), files, mode, guidance)),
+			prompt: savePrompt(repo, buildUpdatePrompt(repo.root, changes, reviewPath(repo.gitDir), updateFile, mode, guidance)),
 			model: options.model,
 			resumeSessionId: resume ? previous.source.reviewSessionId : undefined,
 			schema: UPDATE_SCHEMA,
@@ -222,7 +246,7 @@ async function updateReview(repo: Workspace, changes: ChangeSet, previous: Revie
 
 	options.onProgress({ kind: 'status', message: 'Merging the update…' });
 	const { result, cwd } = outcome;
-	return finishUpdate(repo, changes, previous, result.output, files, {
+	return finishUpdate(repo, changes, plan, result.output, {
 		...previous.source,
 		reviewSessionId: result.sessionId ?? previous.source.reviewSessionId,
 		reviewCwd: cwd,

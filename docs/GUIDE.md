@@ -22,25 +22,27 @@ Diffs open in VS Code's own diff editor, so syntax highlighting, editing, and VS
 4. **Generate review** asks Claude to categorize the change set (HEAD → working tree, including untracked files). The **Review** view then shows:
    - a progress grid at the top, like a disk defragmenter: one square per section, filling the panel width over up to six rows. When sections are too many for that, neighbouring squares merge, and a merged square stays yellow until all of its sections are staged. A square is yellow while its section has unstaged changes and green once they are all staged. Click a square to open its section;
    - a one-line title and a short overview of the change set;
-   - the categories, collapsed when a new review arrives; per category: what the code did before, what it does now, and **Check**: review findings that span several sections (see [Review rules](#review-rules));
-   - categories and sections in reading order: bottom-up by default, from utilities that depend on nothing to the code that uses them, or top-down when a lower layer only makes sense through its caller. Tests always get their own category, last;
-   - per section: the region of code to read, with a summary, an effort pill, and a **Stage** button that stages every change inside it. A method whose implementation is longer than 30 lines always gets a section of its own. The pill follows the section name and shows the number of changed lines in the section; its color is how hard the agent judged the section to review (green low, amber medium, red high). A warning icon after the pill marks a section with review findings; hover over it to read them;
-   - **Not covered by the review**: changes that no section covers, so nothing slips through. These are often only whitespace; **Stage all** next to the heading stages exactly these changes as one undo step.
+   - the categories, collapsed when a new review arrives; per category: a size pill with the number of changed lines in its sections (green up to 50, amber up to 150, red above), what the code did before, what it does now, and **Check**: review findings that span several sections (see [Review rules](#review-rules));
+   - categories and sections from the easiest to review to the hardest: short mechanical changes and pure removals first, then ordinary logic, and code where mistakes hide (concurrency, lifetimes, error handling) last, so the hardest parts come when only a few remain. A section that needs another one to make sense comes after it. Tests always get their own category, last;
+   - per section: the region of code to read, with a summary, a size pill, and a **Stage** button that stages every change inside it. A method whose implementation is longer than 30 lines always gets a section of its own. The pill follows the section name and shows the number of changed lines in the section: green up to 10, amber up to 30, red above. A warning icon after the pill marks a section with review findings; hover over it to read them;
+   - **Not covered by the review**: changes that no section covers, so nothing slips through. Coverage is checked line by line, so the part of a change that a section's range cuts off counts too. Whitespace-only changes, and changes at most two lines from a section, belong to the nearest section of their file instead: the section shows **+N nearby**, and staging it stages them too. **Stage all** next to the heading stages exactly the listed changes as one undo step.
 5. In the diff, section summaries appear as collapsible threads above each section. A section that covers a method longer than 60 lines also gets a short **Note** above each distinct part of the method, such as argument checks, the main loop, or cleanup. Notes appear only in the diff, not in the panel.
 6. The agent groups sections that show parts of one entity, such as a method's declaration in a header and its definition in the source file. In a diff, `Ctrl+Alt+O` or the **Go to Related Section** button jumps to the next section of the group, and the summary above a grouped section links its partners. Section cards in the panel link them too.
-7. Rewritten code is easier to read as two complete versions than as a diff. When the agent tags a section as a rewrite (`layout: "rewrite"`), the section carries a **rewrite** badge and opens as **Old ↔ New**. The HEAD version opens read-only on the left. The working tree file opens on the right. Both are scrolled to the section and show no diff markup. Every section with an old version also has **Diff** and **Old ↔ New** links, and the editor title bar has the same switch. The right side is the real file, so editing and `Ctrl+Alt+S` work there.
+7. Clicking a section always opens it as a diff. Mostly rewritten code can be easier to read as two complete versions: **Old ↔ New** on a section with an old version opens the HEAD version read-only on the left and the working tree file on the right, both scrolled to the section and without diff markup. **Diff** switches back, and the editor title bar has the same switch. The right side is the real file, so editing and `Ctrl+Alt+S` work there.
 
 The Review view title bar holds **Undo**, **Redo**, the inline ⇄ side-by-side switch, the Claude account, and **Settings**. Settings switches VS Code's changed-line and changed-word colors, the summaries in diffs, and **Plain Old ↔ New**, which hides summaries and Stage CodeLenses in the comparison.
 
 ## Updating the review
 
-**Update review** re-reviews only what changed since the review was written:
+**Update review** re-reviews only the code that changed since the review was written. Saving a review keeps a copy of every changed file (`.git/explainyourself/snapshots`), and the update diffs each copy against the current file:
 
-- files whose content changed, including through a new commit;
-- files that joined the change set;
-- files that left it, whose sections are dropped.
+- sections that no edit touches keep their text, and their positions move with the edits;
+- sections that an edit touches go to the agent, with the edits and the current diff around them;
+- edited code that no section covers, and that differs from HEAD, goes to the agent as new code;
+- files that left the change set lose their sections;
+- files that joined the change set, changed through a new commit, or have no copy are reviewed again in full.
 
-The update resumes the review agent's own session (`claude -p --resume`), so the agent already knows the rest of the change set. It returns sections for the listed files only, and the extension merges them into the review. Sections of other files stay unchanged. If the review session no longer exists, a new agent updates the review from `review.json`. **Full regenerate** reviews the whole change set again.
+The extension writes this to `.git/explainyourself/update.md` and resumes the review agent's own session (`claude -p --resume`), so the agent already knows the rest of the change set. The agent returns only the sections and categories that change, by id, and the extension merges them into the review. When the edits touch no reviewed code and add no new code, the update moves the positions without running the agent. If the review session no longer exists, a new agent updates the review from `review.json`. **Full regenerate** reviews the whole change set again.
 
 ## Review rules
 
@@ -73,7 +75,7 @@ Section ranges and notes stay on their code when the file changes later, whether
 - when the first or last line of a section was rewritten, the section starts or ends at the rewritten code;
 - a note on a rewritten line moves to the start of the rewrite.
 
-Only positions move: summaries and notes still describe the code as it was. **Update review** re-reviews every file that changed since the review was written.
+Only positions move: summaries and notes still describe the code as it was. **Update review** re-reviews the sections that the edits touch.
 
 ## Submodules
 
@@ -104,7 +106,8 @@ Agents run read-only: `Read`, `Grep`, `Glob`, and read-only git commands. The re
 | `explainYourself.sessionSearchDays` | 14 | How far back to search session transcripts. |
 | `explainYourself.diffAlgorithm` | `histogram` | Diff algorithm for hunks. |
 | `explainYourself.showSummaries`, `summariesExpanded`, `codeLens` | on | Display options. |
-| `explainYourself.openRewritesSideBySide` | on | Open rewritten sections as Old ↔ New instead of a diff. |
+| `explainYourself.jumpToNextSection` | on | After staging a section, open the next section that still has unstaged changes. |
+| `explainYourself.highlightSections` | on | Shade the lines each section covers in diffs, with a thin bar along their left edge. The colors are the `explainYourself.sectionBackground` and `explainYourself.sectionBorder` theme colors. |
 | `explainYourself.plainCompare` | off | No summaries or CodeLenses in Old ↔ New. |
 | `explainYourself.stageFromEditors` | off | Also allow `Ctrl+Alt+S` and hunk CodeLenses in plain editors. |
 

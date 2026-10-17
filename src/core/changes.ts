@@ -1,6 +1,6 @@
 import { promises as fs } from 'fs';
 import * as path from 'path';
-import { FileDiff, parseDiff } from './diff';
+import { FileDiff, LineRange, parseDiff } from './diff';
 import { git } from './exec';
 import { reviewDir } from './review';
 import { prefixDiff, Workspace, WorkspacePart } from './workspace';
@@ -20,6 +20,8 @@ export interface ChangeSet {
 	annotatedPath: string;
 	/** HEAD -> working tree diffs with zero context, used for coverage checks. */
 	diffs: Map<string, FileDiff>;
+	/** HEAD -> working tree diffs with context, as the annotated diff shows them. Missing for untracked files. */
+	contextDiffs: Map<string, FileDiff>;
 	/** Submodules whose changes the change set includes. */
 	submodules: string[];
 }
@@ -34,6 +36,25 @@ function pad(n: number | string, width: number): string {
 
 function decode(latin1: string): string {
 	return Buffer.from(latin1, 'latin1').toString('utf8');
+}
+
+/** The annotated lines of the hunks of `diff` that touch any of the working tree `ranges`. */
+export function renderHunks(diff: FileDiff, ranges: readonly LineRange[]): string {
+	const out: string[] = [];
+	for (const h of diff.hunks) {
+		const start = h.newStart;
+		const end = h.newStart + Math.max(h.newCount, 1) - 1;
+		if (!ranges.some((r) => r.start <= end + 1 && r.end >= start - 1)) {
+			continue;
+		}
+		out.push(`@@ old ${h.oldStart},${h.oldCount} new ${h.newStart},${h.newCount}`);
+		for (const l of h.lines) {
+			const oldNo = l.oldLine ? pad(l.oldLine, 6) : '      ';
+			const newNo = l.newLine ? pad(l.newLine, 6) : '      ';
+			out.push(`${oldNo} ${newNo} ${l.type}| ${decode(l.text.replace(/\r?\n$/, ''))}`);
+		}
+	}
+	return out.join('\n');
 }
 
 function renderDiff(diff: FileDiff, status: ChangedFile['status']): string {
@@ -158,5 +179,5 @@ export async function buildChangeSet(ws: Workspace): Promise<ChangeSet> {
 		''
 	].join('\n');
 	await fs.writeFile(annotatedPath, legend + sections.join('\n'), 'utf8');
-	return { files, annotatedPath, diffs, submodules: ws.selectedSubmodules };
+	return { files, annotatedPath, diffs, contextDiffs: new Map(contextDiffs.flat().map((d) => [d.path, d])), submodules: ws.selectedSubmodules };
 }

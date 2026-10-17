@@ -1,9 +1,9 @@
 {
   "name": "explain-yourself",
-  "displayName": "ExplainYourself",
+  "displayName": "Explain Yourself: AI Code Review Assistant",
   "description": "AI-assisted code review helper tool: Claude explains your uncommitted changes category by category and flags code smells, and you stage hunks and lines as you accept them.",
-  "version": "0.1.0",
-  "publisher": "explainyourself",
+  "version": "0.1.14",
+  "publisher": "MarkoPintera",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -537,6 +537,28 @@
         "when": "explainYourself.editorView || focusedView == explainYourself.changes || focusedView == explainYourself.review"
       }
     ],
+    "colors": [
+      {
+        "id": "explainYourself.sectionBackground",
+        "description": "Background of the lines a review section covers in diffs. Keep it faint: the diff colors show the changes.",
+        "defaults": {
+          "dark": "#ffffff0d",
+          "light": "#0000000a",
+          "highContrast": "#ffffff0d",
+          "highContrastLight": "#0000000a"
+        }
+      },
+      {
+        "id": "explainYourself.sectionBorder",
+        "description": "Bar along the left edge of the lines a review section covers in diffs. It stays visible over the diff colors.",
+        "defaults": {
+          "dark": "#ffffff59",
+          "light": "#00000040",
+          "highContrast": "#ffffffa0",
+          "highContrastLight": "#00000080"
+        }
+      }
+    ],
     "configuration": {
       "title": "ExplainYourself",
       "properties": {
@@ -581,15 +603,20 @@
           "default": true,
           "description": "Expand inline section summaries by default."
         },
+        "explainYourself.jumpToNextSection": {
+          "type": "boolean",
+          "default": true,
+          "description": "After staging a section, open the next section that still has unstaged changes."
+        },
+        "explainYourself.highlightSections": {
+          "type": "boolean",
+          "default": true,
+          "description": "Shade the lines each review section covers in diffs, with the nearby changes staged along with it. Change the colors with the explainYourself.sectionBackground and explainYourself.sectionBorder theme colors."
+        },
         "explainYourself.codeLens": {
           "type": "boolean",
           "default": true,
           "description": "Show \"Stage hunk\" / \"Unstage hunk\" CodeLenses in diffs."
-        },
-        "explainYourself.openRewritesSideBySide": {
-          "type": "boolean",
-          "default": true,
-          "description": "Open mostly rewritten sections as their complete old and new versions side by side instead of as a diff."
         },
         "explainYourself.plainCompare": {
           "type": "boolean",

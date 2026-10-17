@@ -1,5 +1,5 @@
 import { ChildProcess, spawn } from 'child_process';
-import { claudeProjectsDir } from './sessions';
+import { claudeProjectsDir, REVIEW_SESSION_NAME } from './sessions';
 import { OUTPUT_SCHEMA } from './review';
 
 export interface AgentProgress {
@@ -117,7 +117,7 @@ export function runAgent(options: AgentOptions): AgentRun {
 		}
 	}
 	if (!options.resumeSessionId || options.fork) {
-		args.push('--name', 'ExplainYourself review');
+		args.push('--name', REVIEW_SESSION_NAME);
 	}
 
 	let child: ChildProcess | null = null;

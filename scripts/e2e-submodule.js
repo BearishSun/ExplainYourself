@@ -7,7 +7,7 @@ const path = require('path');
 const { Workspace } = require('../out/core/workspace.js');
 const { generateReview } = require('../out/core/generate.js');
 const { loadFullDiff } = require('../out/core/changes.js');
-const { findUncovered } = require('../out/core/coverage.js');
+const { findCoverage } = require('../out/core/coverage.js');
 
 const model = process.argv[2] || 'claude-sonnet-5-5';
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'explainyourself-e2e-sub-'));
@@ -61,7 +61,7 @@ fs.writeFileSync(path.join(dir, 'main.ts'), "import { clamp } from './lib/clamp'
 		c.sections.forEach((s) => console.log(`  * ${s.file} ${s.newRange ? `${s.newRange.start}-${s.newRange.end}` : '-'}: ${s.title}`));
 	}
 	await ws.refresh();
-	const uncovered = findUncovered(review, await loadFullDiff(ws), (s) => s.newRange);
+	const uncovered = findCoverage(review, await loadFullDiff(ws), (s) => s.newRange).uncovered;
 	console.log(`Uncovered changes: ${JSON.stringify(uncovered)}`);
 	console.log(`Repository: ${dir}`);
 })().catch((e) => {

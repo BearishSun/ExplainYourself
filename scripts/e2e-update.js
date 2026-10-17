@@ -11,7 +11,7 @@ const dir = process.argv[2];
 const model = process.argv[3] || 'claude-sonnet-5-5';
 
 const describe = (review) =>
-	review.categories.flatMap((c) => c.sections.map((s) => `${c.id}/${s.id} ${s.file} ${s.newRange ? `${s.newRange.start}-${s.newRange.end}` : '-'} ${s.layout ?? ''} ${s.title}`));
+	review.categories.flatMap((c) => c.sections.map((s) => `${c.id}/${s.id} ${s.file} ${s.newRange ? `${s.newRange.start}-${s.newRange.end}` : '-'} ${s.title}`));
 
 (async () => {
 	const repo = await Workspace.open(dir);

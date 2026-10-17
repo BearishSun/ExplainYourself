@@ -43,10 +43,24 @@
 	}
 
 	/** Effort indicator: colored by how hard the section is to review, showing its changed line count. */
-	function effortPill(sec) {
-		const title = `${sec.effort[0].toUpperCase()}${sec.effort.slice(1)} effort${sec.estimated ? ' (estimated from size)' : ''}: +${sec.added} −${sec.removed} lines`;
-		return `<span class="effort effort-${sec.effort}" title="${title}">${sec.added + sec.removed}</span>`;
+	/**
+	 * Pill with the number of changed lines, colored by size. Categories hold several sections, so their
+	 * thresholds are higher.
+	 */
+	/** Size class of a changed-line count: low, medium, high or huge, at or below each limit in turn. */
+	function sizeClass(n, limits) {
+		const i = limits.findIndex((limit) => n <= limit);
+		return SIZES[i < 0 ? SIZES.length - 1 : i];
 	}
+	const SIZES = ['low', 'medium', 'high', 'huge'];
+
+	function sizePill(item, limits) {
+		const n = item.changed;
+		const size = sizeClass(n, limits);
+		return `<span class="effort effort-${size}" title="${n} changed lines: +${item.added} −${item.removed}">${n}</span>`;
+	}
+	const SECTION_LIMITS = [10, 30, 80];
+	const CATEGORY_LIMITS = [50, 150, 400];
 
 	/** Review findings as a list, each starting with the tag of the rule it belongs to. */
 	function concernList(concerns) {
@@ -163,7 +177,7 @@
 			parts.push(`<div class="overview">
 				${r.title ? `<h2 class="review-title">${inline(r.title)}</h2>` : ''}
 				<div class="muted small">${when} by ${src}${r.source.model ? ` using <span title="${esc(r.source.model)}">${esc(modelName(r.source.model))}</span>` : ''}${r.source.costUsd ? ` · ${approxCost ? '≈' : ''}$${r.source.costUsd.toFixed(2)}` : ''} · <a data-cmd="explainYourself.showPrompt" title="Open the last prompt sent to Claude">Prompt</a> · <a data-cmd="explainYourself.editReviewRules" title="Edit the rules the review checks the code against">Rules</a></div>
-				${r.stale.length ? `<div class="warn small">Changed since the review: ${r.stale.map(esc).join(', ')}. Use Update review to re-review them.</div>` : ''}
+				${r.stale.length ? `<details class="stale small"><summary><span class="warn">${r.stale.length === 1 ? '1 file changed' : `${r.stale.length} files changed`} since the review.</span> Update review re-reviews ${r.stale.length === 1 ? 'it' : 'them'}.</summary>${r.stale.map((f) => `<div class="stale-file">${esc(f)}</div>`).join('')}</details>` : ''}
 				${md(r.overview)}
 			</div>`);
 
@@ -175,12 +189,13 @@
 						(sec) => `<div class="section ${sec.status}" data-section="${sec.id}">
 						<div class="section-head">
 							<span class="dot" title="${sec.status === 'staged' ? 'Staged' : sec.status === 'context' ? 'Unchanged context' : 'Not staged yet'}"></span>
-							<span class="section-name"><a class="section-title" data-open="${sec.id}">${inline(sec.title)}</a>${sec.status === 'context' ? '' : effortPill(sec)}${
-								sec.concerns.length ? `<span class="warn" tabindex="0" data-concerns="${sec.id}" aria-label="${sec.concerns.length} review findings">${WARNING_ICON}</span>` : ''
-							}${sec.rewrite ? '<span class="badge" title="Mostly rewritten: opens as the old and new versions side by side">rewrite</span>' : ''}</span>
+							<span class="section-name"><a class="section-title" data-open="${sec.id}">${inline(sec.title)}</a>${sec.status === 'context' ? '' : sizePill(sec, SECTION_LIMITS)}${
+								sec.concerns.length ? `<span class="concern-icon" tabindex="0" data-concerns="${sec.id}" aria-label="${sec.concerns.length} review findings">${WARNING_ICON}</span>` : ''
+							}</span>
 							${sec.status === 'pending' ? `<button class="small" data-stage="${sec.id}" title="Stage every change inside this section">Stage</button>` : ''}
 						</div>
-						<div class="file muted small"><a data-open="${sec.id}">${esc(sec.file)}${sec.lines ? `:${esc(sec.lines)}` : ''}</a>
+						<div class="file muted small"><a data-open="${sec.id}">${esc(sec.file)}${sec.lines ? `:${esc(sec.lines)}` : ''}</a>${
+								sec.nearby ? ` <span class="nearby" title="Whitespace changes and changes next to this section. Staging the section stages them too.">+${sec.nearby} nearby</span>` : ''}
 							${sec.comparable ? `<span class="views"><a data-open-diff="${sec.id}" title="Open as a diff">Diff</a> · <a data-compare="${sec.id}" title="Old and new versions side by side, without diff markup">Old ↔ New</a></span>` : ''}</div>
 						<div class="summary">${md(sec.summary)}</div>
 						${sec.related.length ? `<div class="related small muted">Related: ${sec.related.map((x) => `<a data-open="${x.id}" title="Open the related section">${esc(x.file.split('/').pop())}${x.lines ? `:${esc(x.lines)}` : ''}</a>`).join(' · ')}</div>` : ''}
@@ -188,7 +203,7 @@
 					)
 					.join('');
 				parts.push(`<details class="category ${done ? 'done' : ''}" data-category="${c.id}" ${open ? 'open' : ''}>
-					<summary><span class="cat-title">${inline(c.title)}</span> <span class="count">${c.staged}/${c.total}</span>
+					<summary><span class="cat-title">${inline(c.title)}${c.total ? sizePill(c, CATEGORY_LIMITS) : ''}</span> <span class="count">${c.staged}/${c.total}</span>
 					${!done ? `<button class="small" data-stage-category="${c.id}" title="Stage every change in this category">Stage all</button>` : ''}</summary>
 					<div class="behavior"><div class="label">Before</div>${md(c.oldBehavior)}</div>
 					<div class="behavior"><div class="label">After</div>${md(c.newBehavior)}</div>
@@ -292,7 +307,7 @@
 		root.querySelectorAll('[data-open-diff]').forEach((b) =>
 			b.addEventListener('click', (e) => {
 				e.preventDefault();
-				run('explainYourself.openSection', /** @type {HTMLElement} */ (b).dataset.openDiff, 'diff');
+				run('explainYourself.openSection', /** @type {HTMLElement} */ (b).dataset.openDiff);
 			})
 		);
 		root.querySelectorAll('[data-compare]').forEach((b) =>
@@ -383,7 +398,9 @@
 		const gap = Math.max(1, Math.round(GAP * dpr));
 		const maxCell = Math.round(MAX_CELL * dpr);
 		let cells = r.categories.flatMap((c) =>
-			c.sections.filter((sec) => sec.status !== 'context').map((sec) => [{ id: sec.id, staged: sec.status === 'staged', title: `${c.title} › ${sec.title}` }])
+			c.sections
+				.filter((sec) => sec.status !== 'context')
+				.map((sec) => [{ id: sec.id, staged: sec.status === 'staged', size: SIZES.indexOf(sizeClass(sec.changed, SECTION_LIMITS)), title: `${c.title} › ${sec.title}` }])
 		);
 		let cols = 1;
 		let cell = maxCell;
@@ -424,7 +441,8 @@
 			const done = staged === group.length;
 			// A merged square opens its first section that still needs review.
 			sq.dataset.sq = (group.find((x) => !x.staged) ?? group[0]).id;
-			sq.className = `sq ${done ? 'staged' : 'pending'}`;
+			// Colored by size, like the pills; a merged square takes the size of its largest section.
+			sq.className = `sq ${done ? 'staged' : 'pending'} size-${SIZES[Math.max(...group.map((x) => x.size))]}`;
 			sq.title =
 				group.length === 1
 					? `${group[0].title} (${done ? 'staged' : 'to review'})`

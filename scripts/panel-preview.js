@@ -19,19 +19,18 @@ for (let c = 0, i = 0; i < total; c++) {
 			summary: `Changes \`Function${i}()\`.`,
 			lines: `${10 * s + 1}-${10 * s + 8}`,
 			status: (i * 7) % total < staged ? 'staged' : 'pending',
-			rewrite: false,
 			comparable: true,
 			related: s === 0 ? [{ id: `c${c}s1`, file: `src/module${c}/file1.h`, lines: '4-6' }] : [],
-			effort: ['low', 'medium', 'high'][(i * 5) % 3],
-			estimated: false,
 			added: (i * 37) % 90,
 			removed: (i * 11) % 20,
-			concerns: i % 4 === 1 ? [{ tag: 'Duplication', text: `\`Parse${i}()\` repeats the loop of \`ParseHeader()\`; call it instead.` }, { tag: 'Docs', text: 'The comment still describes the old retry count.' }] : []
+			changed: Math.max((i * 37) % 90, (i * 11) % 20),
+			concerns: i % 4 === 1 ? [{ tag: 'Duplication', text: `\`Parse${i}()\` repeats the loop of \`ParseHeader()\`; call it instead.` }, { tag: 'Docs', text: 'The comment still describes the old retry count.' }] : [],
+			nearby: i % 3 === 0 ? 2 : 0
 		});
 	}
 	const done = sections.filter((x) => x.status === 'staged').length;
 	const concerns = c % 2 === 0 ? [{ tag: 'Layering', text: '`HeapPool` includes `D3D12Device.h` only for one enum; move the enum to the common header.' }, { tag: 'Performance', text: '`FindFreeBlock()` scans every block per allocation: O(n²) over a frame with many allocations.' }] : [];
-	categories.push({ id: `c${c}`, title: `Category ${c}`, oldBehavior: 'Before.', newBehavior: 'After.', concerns, staged: done, total: sections.length, sections });
+	categories.push({ id: `c${c}`, title: `Category ${c}`, oldBehavior: 'Before.', newBehavior: 'After.', concerns, staged: done, total: sections.length, added: sections.reduce((n, x) => n + x.added, 0), removed: sections.reduce((n, x) => n + x.removed, 0), changed: sections.reduce((n, x) => n + x.changed, 0), sections });
 }
 const noReview = total === 0;
 const state = {

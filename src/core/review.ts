@@ -12,18 +12,12 @@ export interface ReviewSection {
 	newRange?: LineRange;
 	/** Lines in the HEAD version. */
 	oldRange?: LineRange;
-	/** "rewrite": mostly rewritten code that reads better as old and new versions side by side than as a diff. */
-	layout?: 'rewrite';
 	/** Sections with the same group are parts of one entity, such as a method's declaration and its definition. */
 	group?: string;
-	/** How hard the section is to review, judged by the agent. */
-	effort?: Effort;
 	/** Comments on the parts of a long method, shown in the diff above each part. */
 	notes?: SectionNote[];
 	/** Review findings about this section. */
 	concerns?: Concern[];
-	/** Update output only: id of the existing section this one goes before. Consumed by mergeUpdate(). */
-	insertBefore?: string;
 }
 
 export interface SectionNote {
@@ -39,8 +33,6 @@ export interface Concern {
 	text: string;
 }
 
-export type Effort = 'low' | 'medium' | 'high';
-const EFFORTS: readonly string[] = ['low', 'medium', 'high'];
 
 export interface ReviewCategory {
 	id: string;
@@ -114,19 +106,9 @@ const SECTION_SCHEMA = {
 		newEnd: { type: 'integer', description: '1-based last line (inclusive) in the working tree version.' },
 		oldStart: { type: 'integer', description: '1-based first line in the HEAD version.' },
 		oldEnd: { type: 'integer', description: '1-based last line (inclusive) in the HEAD version.' },
-		layout: {
-			type: 'string',
-			enum: ['diff', 'rewrite'],
-			description: '"rewrite" when most of the region was rewritten and reads better as old and new versions side by side.'
-		},
 		group: {
 			type: 'string',
 			description: 'Shared by sections that show parts of one entity, such as a declaration in a header and its definition. Use the qualified name, for example "GpuDevice::EndFrame".'
-		},
-		effort: {
-			type: 'string',
-			enum: ['low', 'medium', 'high'],
-			description: 'How hard the section is to review: low for mechanical or obvious code, medium for ordinary logic, high for subtle logic such as concurrency, lifetimes or tricky invariants.'
 		},
 		notes: {
 			type: 'array',
@@ -145,12 +127,18 @@ const SECTION_SCHEMA = {
 	}
 } as const;
 
-/** Update sections can also say where they go among the sections that stay. */
+/** Update sections change, remove or add single sections. Fields left out of a change keep their value. */
 const UPDATE_SECTION_SCHEMA = {
-	...SECTION_SCHEMA,
+	type: 'object',
+	additionalProperties: false,
 	properties: {
-		...SECTION_SCHEMA.properties,
-		before: { type: 'string', description: 'Id of an existing section of the same category that this section should precede in reading order. Omit to take the place of the previous sections of the same file, or to go last.' }
+		id: { type: 'string', description: 'Id of the existing section this entry changes or removes. Omit for a new section.' },
+		remove: { type: 'boolean', description: 'With id: removes the section.' },
+		before: {
+			type: 'string',
+			description: 'Id of the section this one should precede in its category. Omit to keep the place of an existing section, or to put a new one after the sections of the same file.'
+		},
+		...SECTION_SCHEMA.properties
 	}
 } as const;
 
@@ -178,7 +166,7 @@ export const OUTPUT_SCHEMA = {
 	}
 } as const;
 
-/** Schema for incremental updates: categories carry the id of the category they update, sections cover only re-reviewed files. */
+/** Schema for review updates: categories and sections that change, by id, and new ones. */
 export const UPDATE_SCHEMA = {
 	type: 'object',
 	additionalProperties: false,
@@ -191,11 +179,13 @@ export const UPDATE_SCHEMA = {
 			items: {
 				type: 'object',
 				additionalProperties: false,
-				required: ['title', 'oldBehavior', 'newBehavior', 'sections'],
 				properties: {
-					id: { type: 'string', description: 'Id of the existing category this entry updates. Omit for a new category.' },
+					id: { type: 'string', description: 'Id of the existing category this entry changes or adds sections to. Omit for a new category, which needs title, oldBehavior and newBehavior.' },
 					before: { type: 'string', description: 'New categories only: id of the existing category this one should precede in reading order. Omit to add it last.' },
-					...CATEGORY_PROPERTIES,
+					title: { type: 'string', description: 'Omit to keep the current title.' },
+					oldBehavior: { type: 'string', description: 'Omit to keep the current text.' },
+					newBehavior: { type: 'string', description: 'Omit to keep the current text.' },
+					concerns: { ...CONCERNS_SCHEMA, description: 'All findings of the category after the update. Omit to keep the current ones; give an empty list to remove them.' },
 					sections: { type: 'array', items: UPDATE_SECTION_SCHEMA }
 				}
 			}
@@ -276,6 +266,53 @@ export interface NormalizeContext {
 	lineCount: (file: string) => Promise<number | null>;
 }
 
+function record(v: unknown): Record<string, unknown> {
+	return (v && typeof v === 'object' ? v : {}) as Record<string, unknown>;
+}
+
+/** Validates one section of agent output. Returns null, after reporting why, when it is unusable. */
+async function parseSection(s: Record<string, unknown>, label: string, ctx: NormalizeContext, errors: string[], warnings: string[]): Promise<Omit<ReviewSection, 'id'> | null> {
+	const file = str(s.file).replace(/\\/g, '/').replace(/^\.\//, '');
+	if (!file) {
+		errors.push(`${label}: missing file.`);
+		return null;
+	}
+
+	let newRange = range(s.newStart, s.newEnd, s.newRange);
+	const oldRange = range(s.oldStart, s.oldEnd, s.oldRange);
+	if (!newRange && !oldRange) {
+		errors.push(`${label} (${file}): needs newStart/newEnd or oldStart/oldEnd.`);
+		return null;
+	}
+
+	if (newRange) {
+		const count = await ctx.lineCount(file);
+		if (count === null) {
+			warnings.push(`${label}: ${file} does not exist in the working tree; its new range was dropped.`);
+			newRange = undefined;
+		} else if (newRange.start > count) {
+			warnings.push(`${label}: lines ${newRange.start}-${newRange.end} lie past the end of ${file} (${count} lines).`);
+			newRange = undefined;
+		} else if (newRange.end > count) {
+			newRange.end = count;
+		}
+	}
+	if (!newRange && !oldRange) {
+		return null;
+	}
+
+	return {
+		file,
+		title: str(s.title) || path.posix.basename(file),
+		summary: str(s.summary),
+		newRange,
+		oldRange,
+		group: str(s.group) || undefined,
+		notes: notes(s.notes, newRange, label, warnings),
+		concerns: concerns(s.concerns)
+	};
+}
+
 /** Converts agent output (flat or nested ranges) into a Review, reporting problems instead of throwing. */
 export async function normalizeReview(raw: unknown, ctx: NormalizeContext): Promise<NormalizeResult> {
 	const errors: string[] = [];
@@ -300,52 +337,10 @@ export async function normalizeReview(raw: unknown, ctx: NormalizeContext): Prom
 
 		const rawSections = Array.isArray(c.sections) ? c.sections : [];
 		for (const [si, rs] of rawSections.entries()) {
-			const s = (rs ?? {}) as Record<string, unknown>;
-			const file = str(s.file).replace(/\\/g, '/').replace(/^\.\//, '');
-			const label = `Category "${category.title}", section ${si + 1}`;
-			if (!file) {
-				errors.push(`${label}: missing file.`);
-				continue;
+			const section = await parseSection(record(rs), `Category "${category.title}", section ${si + 1}`, ctx, errors, warnings);
+			if (section) {
+				category.sections.push({ id: `${category.id}s${si + 1}`, ...section });
 			}
-
-			let newRange = range(s.newStart, s.newEnd, s.newRange);
-			const oldRange = range(s.oldStart, s.oldEnd, s.oldRange);
-			if (!newRange && !oldRange) {
-				errors.push(`${label} (${file}): needs newStart/newEnd or oldStart/oldEnd.`);
-				continue;
-			}
-
-			if (newRange) {
-				const count = await ctx.lineCount(file);
-				if (count === null) {
-					warnings.push(`${label}: ${file} does not exist in the working tree; its new range was dropped.`);
-					newRange = undefined;
-				} else if (newRange.start > count) {
-					warnings.push(`${label}: lines ${newRange.start}-${newRange.end} lie past the end of ${file} (${count} lines).`);
-					newRange = undefined;
-				} else if (newRange.end > count) {
-					newRange.end = count;
-				}
-			}
-
-			if (!newRange && !oldRange) {
-				continue;
-			}
-
-			category.sections.push({
-				id: `${category.id}s${si + 1}`,
-				file,
-				title: str(s.title) || path.posix.basename(file),
-				summary: str(s.summary),
-				newRange,
-				oldRange,
-				layout: str(s.layout) === 'rewrite' ? 'rewrite' : undefined,
-				group: str(s.group) || undefined,
-				effort: EFFORTS.includes(str(s.effort)) ? (str(s.effort) as Effort) : undefined,
-				notes: notes(s.notes, newRange, label, warnings),
-				concerns: concerns(s.concerns),
-				insertBefore: str(s.before) || undefined
-			});
 		}
 		categories.push(category);
 	}
@@ -450,62 +445,141 @@ export async function adoptSnapshot(gitDir: string, root: string, file: string, 
  * update; everything else is kept. Update categories with a known id update that category, others are added.
  * Categories left without sections are dropped.
  */
-export async function mergeUpdate(previous: Review, raw: unknown, changed: ReadonlySet<string>, ctx: NormalizeContext): Promise<NormalizeResult> {
-	const obj = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
-	const rawCategories = Array.isArray(obj.categories) ? (obj.categories as Record<string, unknown>[]) : [];
-	// Reuse the full normalization for validation; it keeps the order of the categories.
-	const { review: parsed, errors, warnings } = await normalizeReview(obj.categories ? obj : { ...obj, categories: [] }, ctx);
-	const realErrors = errors.filter((e) => e !== 'The review has no categories.');
+/**
+ * Applies update output to `base`, the previous review with its positions moved to the current files.
+ * Entries with an id change or remove that category or section; fields they leave out keep their value.
+ * Entries without an id add categories and sections. In `wholeFiles`, files the update reviewed again in
+ * full, sections that the output does not mention are removed. Categories left without sections are removed.
+ */
+export async function mergeUpdate(base: Review, raw: unknown, wholeFiles: ReadonlySet<string>, ctx: NormalizeContext): Promise<NormalizeResult> {
+	const errors: string[] = [];
+	const warnings: string[] = [];
+	const obj = record(raw);
+	const categories: ReviewCategory[] = base.categories.map((c) => ({ ...c, sections: [...c.sections] }));
+	let nextCategory = Math.max(0, ...categories.map((c) => parseInt(c.id.substring(1), 10) || 0)) + 1;
+	const ids = new Set(categories.flatMap((c) => c.sections.map((s) => s.id)));
+	const mentioned = new Set<string>();
 
-	// Sections of re-reviewed files leave a placeholder, so their replacements keep the reading order.
-	type Slot = ReviewSection | { placeholder: string };
-	const slots = new Map<string, Slot[]>(previous.categories.map((c) => [c.id, c.sections.map((s): Slot => (changed.has(s.file) ? { placeholder: s.file } : s))]));
-	const categories: ReviewCategory[] = previous.categories.map((c) => ({ ...c, sections: [] }));
-	let nextCategory = Math.max(0, ...previous.categories.map((c) => parseInt(c.id.substring(1), 10) || 0)) + 1;
-	const sectionNumber = (s: Slot) => ('id' in s ? parseInt(s.id.split('s').pop() ?? '', 10) || 0 : 0);
-
-	parsed.categories.forEach((update, i) => {
-		const id = str(rawCategories[i]?.id);
-		let target = categories.find((c) => c.id === id);
-		if (target) {
-			target.title = update.title || target.title;
-			target.oldBehavior = update.oldBehavior || target.oldBehavior;
-			target.newBehavior = update.newBehavior || target.newBehavior;
-			target.concerns = update.concerns;
-		} else {
-			if (id) {
-				warnings.push(`Unknown category id "${id}"; "${update.title}" was added as a new category.`);
-			}
-			target = { ...update, id: `c${nextCategory++}`, sections: [] };
-			const before = categories.findIndex((c) => c.id === str(rawCategories[i]?.before));
-			categories.splice(before >= 0 ? before : categories.length, 0, target);
-			slots.set(target.id, []);
+	const newId = (c: ReviewCategory): string => {
+		let n = 1;
+		while (ids.has(`${c.id}s${n}`)) {
+			n++;
 		}
-
-		const list = slots.get(target.id)!;
-		let nextSection = Math.max(0, ...list.map(sectionNumber)) + 1;
-		for (const { insertBefore, ...s } of update.sections) {
-			const section: ReviewSection = { ...s, id: `${target.id}s${nextSection++}` };
-			let at = insertBefore ? list.findIndex((x) => 'id' in x && x.id === insertBefore) : -1;
-			if (at < 0) {
-				at = list.findIndex((x) => 'placeholder' in x && x.placeholder === s.file);
+		ids.add(`${c.id}s${n}`);
+		return `${c.id}s${n}`;
+	};
+	const locate = (id: string): { category: ReviewCategory; index: number } | undefined => {
+		for (const category of categories) {
+			const index = category.sections.findIndex((s) => s.id === id);
+			if (index >= 0) {
+				return { category, index };
 			}
-			list.splice(at >= 0 ? at : list.length, 0, section);
 		}
+		return undefined;
+	};
+	// Before the given section, or after the other sections of the same file, or last.
+	const place = (target: ReviewCategory, section: ReviewSection, before: string) => {
+		let at = before ? target.sections.findIndex((s) => s.id === before) : -1;
+		if (at < 0) {
+			const last = target.sections.map((s) => s.file).lastIndexOf(section.file);
+			at = last >= 0 ? last + 1 : target.sections.length;
+		}
+		target.sections.splice(at, 0, section);
+	};
+	// The fields of an existing section, in the form the agent writes them.
+	const asRaw = (s: ReviewSection): Record<string, unknown> => ({
+		file: s.file,
+		title: s.title,
+		summary: s.summary,
+		newStart: s.newRange?.start,
+		newEnd: s.newRange?.end,
+		oldStart: s.oldRange?.start,
+		oldEnd: s.oldRange?.end,
+		group: s.group,
+		notes: s.notes,
+		concerns: s.concerns
 	});
-	for (const c of categories) {
-		c.sections = slots.get(c.id)!.filter((x): x is ReviewSection => 'id' in x);
+
+	const rawCategories = Array.isArray(obj.categories) ? obj.categories : [];
+	for (const [ci, entry] of rawCategories.entries()) {
+		const rc = record(entry);
+		const id = str(rc.id);
+		let target = id ? categories.find((c) => c.id === id) : undefined;
+		if (!target) {
+			if (!str(rc.title) || !str(rc.newBehavior)) {
+				errors.push(id ? `Unknown category id "${id}".` : `New category ${ci + 1}: needs title, oldBehavior and newBehavior.`);
+				continue;
+			}
+			if (id) {
+				warnings.push(`Unknown category id "${id}"; "${str(rc.title)}" was added as a new category.`);
+			}
+			target = { id: `c${nextCategory++}`, title: '', oldBehavior: '', newBehavior: '', sections: [] };
+			const before = categories.findIndex((c) => c.id === str(rc.before));
+			categories.splice(before >= 0 ? before : categories.length, 0, target);
+		}
+		target.title = str(rc.title) || target.title;
+		target.oldBehavior = str(rc.oldBehavior) || target.oldBehavior;
+		target.newBehavior = str(rc.newBehavior) || target.newBehavior;
+		if (rc.concerns !== undefined) {
+			target.concerns = concerns(rc.concerns);
+		}
+
+		const rawSections = Array.isArray(rc.sections) ? rc.sections : [];
+		for (const [si, item] of rawSections.entries()) {
+			const rs = record(item);
+			const sid = str(rs.id);
+			const label = `Category "${target.title}", section ${si + 1}${sid ? ` (${sid})` : ''}`;
+			const found = sid ? locate(sid) : undefined;
+			if (sid && !found) {
+				warnings.push(`${label}: unknown section id; added as a new section.`);
+			}
+			if (rs.remove === true) {
+				if (found) {
+					mentioned.add(sid);
+					found.category.sections.splice(found.index, 1);
+				}
+				continue;
+			}
+
+			if (found) {
+				const old = found.category.sections[found.index];
+				const fields = Object.fromEntries(Object.entries(rs).filter(([k, v]) => v !== undefined && v !== null && k !== 'id' && k !== 'before' && k !== 'remove' && k !== 'file'));
+				const section = await parseSection({ ...asRaw(old), ...fields }, label, ctx, errors, warnings);
+				mentioned.add(sid);
+				if (!section) {
+					continue;
+				}
+				const updated: ReviewSection = { ...section, id: old.id };
+				if (found.category === target && !str(rs.before)) {
+					target.sections[found.index] = updated;
+				} else {
+					found.category.sections.splice(found.index, 1);
+					place(target, updated, str(rs.before));
+				}
+				continue;
+			}
+
+			const section = await parseSection(rs, label, ctx, errors, warnings);
+			if (section) {
+				const added: ReviewSection = { ...section, id: newId(target) };
+				mentioned.add(added.id);
+				place(target, added, str(rs.before));
+			}
+		}
 	}
 
+	for (const c of categories) {
+		c.sections = c.sections.filter((s) => !wholeFiles.has(s.file) || mentioned.has(s.id));
+	}
 	const review: Review = {
-		...previous,
+		...base,
 		updatedAt: new Date().toISOString(),
 		head: ctx.head,
-		title: parsed.title || previous.title,
-		overview: parsed.overview || previous.overview,
+		title: str(obj.title).split('\n')[0].trim() || base.title,
+		overview: str(obj.overview) || base.overview,
 		categories: categories.filter((c) => c.sections.length > 0)
 	};
-	return { review, errors: realErrors, warnings };
+	return { review, errors, warnings };
 }
 
 export function reviewDir(gitDir: string): string {

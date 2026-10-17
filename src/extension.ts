@@ -7,7 +7,7 @@ import { activeRulesFile, DEFAULT_REVIEW_RULES, userRulesFile } from './core/gui
 import { migrateUserData } from './core/legacy';
 import { reviewDir, ReviewSection } from './core/review';
 import { findSessions } from './core/sessions';
-import { selectLines, withAdjacentBlankLines } from './core/stager';
+import { selectSections } from './core/stager';
 import { StatusEntry } from './core/status';
 import { ChangesTree } from './ui/changesTree';
 import { ClaudeAccount } from './ui/claude';
@@ -91,14 +91,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<Explai
 		setRepoContext();
 	};
 
-	/** Stages every unstaged change inside the given sections as one undo step. */
+	/** Stages every unstaged change inside the given sections, and the small changes next to them, as one undo step. */
 	const stageSections = async (sections: ReviewSection[], label: string) => {
 		const repo = requireRepo();
 		if (!repo) {
 			return;
 		}
 		const byFile = new Map<string, ReviewSection[]>();
-		for (const s of sections) {
+		for (const s of sections.flatMap((x) => state.stageUnits(x))) {
 			if (state.sectionStatus(s) === 'pending') {
 				byFile.set(s.file, [...(byFile.get(s.file) ?? []), s]);
 			}
@@ -108,7 +108,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Explai
 			const oldRanges = list.flatMap((s) => (s.oldRange ? indexRanges(repo, s, undefined) : []));
 			return {
 				rel,
-				select: (d: FileDiff) => withAdjacentBlankLines(d.hunks, new Set<DiffLine>([...selectLines(d.hunks, newRanges, 'new'), ...selectLines(d.hunks, oldRanges, 'old')]))
+				select: (d: FileDiff) => selectSections(d.hunks, newRanges, oldRanges)
 			};
 		});
 		if (items.length > 0) {
@@ -274,7 +274,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Explai
 	});
 	register('explainYourself.useInSession', () => useInSession(context.extensionPath, state.repo?.root));
 
-	register('explainYourself.openSection', (id: string, mode?: 'auto' | 'diff') => diffs.openSection(id, mode));
+	register('explainYourself.openSection', (id: string) => diffs.openSection(id));
 	register('explainYourself.compareSection', (arg: string | vscode.CommentThread) => {
 		const id = typeof arg === 'string' ? arg : diffs.sectionOfThread(arg);
 		return id ? diffs.compareSection(id) : undefined;
@@ -289,8 +289,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<Explai
 	register('explainYourself.stageSection', async (arg: string | vscode.CommentThread) => {
 		const id = typeof arg === 'string' ? arg : diffs.sectionOfThread(arg);
 		const found = id ? state.findSection(id) : undefined;
-		if (found) {
-			await stageSections([found.section], `Stage section "${found.section.title}"`);
+		if (!found) {
+			return;
+		}
+		// Pick the next section before staging: the next one in review order that still has unstaged changes.
+		const all = (state.review?.categories ?? []).flatMap((c) => c.sections);
+		const index = all.indexOf(found.section);
+		const next = [...all.slice(index + 1), ...all.slice(0, index)].find((s) => state.sectionStatus(s) === 'pending');
+		await stageSections([found.section], `Stage section "${found.section.title}"`);
+		if (next && config().get('jumpToNextSection', true)) {
+			await diffs.openSection(next.id);
+			reviewView.follow(next.id);
 		}
 	});
 	register('explainYourself.revealSection', (thread: vscode.CommentThread) => {

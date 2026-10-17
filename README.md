@@ -4,7 +4,7 @@ An AI-assisted code review helper tool for VS Code. Before you commit, Claude ex
 
 ![ExplainYourself](docs/screenshot.png)
 
-- **Changes grouped for reading.** Claude sorts the change set into categories, each with what the code did before and what it does now. Categories and sections come in reading order, from low-level code up, with tests last.
+- **Changes grouped for reading.** Claude sorts the change set into categories, each with what the code did before and what it does now. Categories and sections go from the easiest to review to the hardest, with tests last.
 - **Summaries next to the code.** Each relevant region of code is a section with a summary, shown in the panel and above the code in VS Code's own diff editor. Long methods get a short note above each part.
 - **Review findings.** Each category and section lists what a careful reviewer would push back on: hacks, duplication, layering problems, outdated documentation, performance traps, and breaks of your `CLAUDE.md` / `AGENTS.md` conventions. The rules are editable.
 - **Fast staging with undo.** Stage a section, a category, a hunk or selected lines with one click or `Ctrl+Alt+S`. `Ctrl+Alt+Z` undoes any of them.
@@ -22,7 +22,7 @@ An AI-assisted code review helper tool for VS Code. Before you commit, Claude ex
 2. Click **Generate review**. Claude reads all changes from HEAD to the working tree, including untracked files.
 3. Open a category, then click a section to see its code in the diff.
 4. Stage what you accept: **Stage** on a section, **Stage all** on a category, the **Stage hunk** buttons in the diff, or `Ctrl+Alt+S` for the selected lines.
-5. After you edit the code, **Update review** re-reviews only the files that changed.
+5. After you edit the code, **Update review** re-reviews only the sections your edits touch, and any new code.
 
 | Key | Action |
 | --- | --- |
@@ -39,7 +39,7 @@ The [guide](docs/GUIDE.md) describes every feature in detail: review rules, subm
 ```bash
 npm install
 npm run package
-code --install-extension explain-yourself-0.1.0.vsix
+code --install-extension explain-yourself-<version>.vsix
 ```
 
 ## License

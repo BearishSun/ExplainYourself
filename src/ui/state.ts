@@ -4,13 +4,18 @@ import * as vscode from 'vscode';
 import { AgentProgress, AgentRun } from '../core/agent';
 import { LineMap } from '../core/anchors';
 import { loadFullDiff } from '../core/changes';
-import { deriveOldRange, findUncovered, sectionStatus, SectionStatus, UncoveredChange } from '../core/coverage';
+import { deriveOldRange, findCoverage, sectionStatus, SectionStatus, UncoveredChange } from '../core/coverage';
 import { FileDiff, LineRange } from '../core/diff';
 import { generateReview, GenerateSource } from '../core/generate';
 import { migrateRepositoryData } from '../core/legacy';
 import { adoptSnapshot, computeFingerprints, DELETED, loadReview, Review, ReviewCategory, ReviewSection, reviewDir, SectionNote } from '../core/review';
 import { loadSubmoduleSelection, saveSubmoduleSelection, Workspace } from '../core/workspace';
 import { config, log } from './util';
+
+/** A change outside the review's sections, as a section that holds only that change, so it can be staged like one. */
+function changeSection(change: UncoveredChange, id: string): ReviewSection {
+	return { id, file: change.file, title: `${change.file}:${change.line}`, summary: '', newRange: change.newRange, oldRange: change.oldRange };
+}
 
 export interface GenerationState {
 	log: AgentProgress[];
@@ -25,6 +30,8 @@ export class AppState implements vscode.Disposable {
 	review?: Review;
 	fullDiffs = new Map<string, FileDiff>();
 	uncovered: UncoveredChange[] = [];
+	/** Small changes next to a section, by section id. Staging the section stages them too. */
+	attached = new Map<string, UncoveredChange[]>();
 	/** Files changed on disk since the review was generated, outside of tracked editor edits. */
 	staleFiles = new Set<string>();
 	generation?: GenerationState;
@@ -235,6 +242,7 @@ export class AppState implements vscode.Disposable {
 		if (!repo || !review) {
 			this.fullDiffs.clear();
 			this.uncovered = [];
+			this.attached.clear();
 			this.staleFiles.clear();
 			this.reviewEmitter.fire();
 			return;
@@ -242,7 +250,7 @@ export class AppState implements vscode.Disposable {
 
 		await this.relocate([...this.snapshots.keys()]);
 		this.fullDiffs = await loadFullDiff(repo);
-		this.uncovered = findUncovered(review, this.fullDiffs, (s) => this.newRange(s));
+		({ uncovered: this.uncovered, attached: this.attached } = findCoverage(review, this.fullDiffs, (s) => this.newRange(s)));
 
 		const current = await computeFingerprints(repo.root, Object.keys(review.fingerprints));
 		this.staleFiles.clear();
@@ -262,7 +270,12 @@ export class AppState implements vscode.Disposable {
 
 	/** Changes no section covers, as sections that hold one change each, so they can be staged like sections. */
 	uncoveredSections(): ReviewSection[] {
-		return this.uncovered.map((u, i) => ({ id: `uncovered${i}`, file: u.file, title: `${u.file}:${u.line}`, summary: '', newRange: u.newRange, oldRange: u.oldRange }));
+		return this.uncovered.map((u, i) => changeSection(u, `uncovered${i}`));
+	}
+
+	/** What staging a section stages: the section, and the small changes next to it as sections of their own. */
+	stageUnits(section: ReviewSection): ReviewSection[] {
+		return [section, ...(this.attached.get(section.id) ?? []).map((u, i) => changeSection(u, `${section.id}~${i}`))];
 	}
 
 	/** Notes of a section, at their current lines. */
@@ -290,11 +303,6 @@ export class AppState implements vscode.Disposable {
 		return deriveOldRange(diff.hunks, newRange);
 	}
 
-	/** Sections the agent tagged as rewritten, when an old version exists to compare with. */
-	isRewrite(section: ReviewSection): boolean {
-		return section.layout === 'rewrite' && !!this.newRange(section) && !!this.compareOldRange(section) && this.headPath(section) !== null;
-	}
-
 	/** The other sections of a section's group, in review order. */
 	relatedSections(section: ReviewSection): ReviewSection[] {
 		if (!section.group) {
@@ -303,11 +311,15 @@ export class AppState implements vscode.Disposable {
 		return (this.review?.categories ?? []).flatMap((c) => c.sections).filter((s) => s.group === section.group && s.id !== section.id);
 	}
 
+	/** Status of a section, counting the small changes next to it. */
 	sectionStatus(section: ReviewSection): SectionStatus {
-		if (!this.repo) {
+		const repo = this.repo;
+		if (!repo) {
 			return 'pending';
 		}
-		return sectionStatus(this.repo, section, this.newRange(section), new Set(this.fullDiffs.keys()));
+		const changed = new Set(this.fullDiffs.keys());
+		const status = sectionStatus(repo, section, this.newRange(section), changed);
+		return status !== 'pending' && this.stageUnits(section).slice(1).some((u) => sectionStatus(repo, u, u.newRange, changed) === 'pending') ? 'pending' : status;
 	}
 
 	sectionsForFile(file: string): { category: ReviewCategory; section: ReviewSection }[] {

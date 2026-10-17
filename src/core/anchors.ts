@@ -44,6 +44,28 @@ export class LineMap {
 		return end >= start ? { start: this.clampNew(start), end: this.clampNew(end) } : { start: this.clampNew(start), end: this.clampNew(start) };
 	}
 
+	/**
+	 * The edits between the two versions, in order: each replaces old lines with new lines. Either side can be
+	 * empty; an empty side holds no lines and sits between its `end` and its `start`, which is `end` + 1.
+	 */
+	blocks(): { old: LineRange; new: LineRange }[] {
+		const result: { old: LineRange; new: LineRange }[] = [];
+		let oldPrev = 0;
+		let newPrev = 0;
+		for (let i = 1; i < this.toNew.length; i++) {
+			const j = this.toNew[i];
+			if (!j) {
+				continue;
+			}
+			if (i > oldPrev + 1 || j > newPrev + 1) {
+				result.push({ old: { start: oldPrev + 1, end: i - 1 }, new: { start: newPrev + 1, end: j - 1 } });
+			}
+			oldPrev = i;
+			newPrev = j;
+		}
+		return result;
+	}
+
 	/** New line of the closest unchanged old line above `old`, or 0. */
 	private previousMatch(old: number): number {
 		for (let i = Math.min(this.clampOld(old), this.toNew.length - 2) - 1; i >= 1; i--) {
@@ -74,7 +96,8 @@ export class LineMap {
 }
 
 /** Lines without terminators. Line endings and trailing whitespace do not count as changes. */
-function lines(content: string): string[] {
+/** Lines of a text, without line endings or trailing whitespace. */
+export function lines(content: string): string[] {
 	const result = content.split('\n').map((l) => l.trimEnd());
 	if (result.length > 0 && result[result.length - 1] === '' && content.endsWith('\n')) {
 		result.pop();

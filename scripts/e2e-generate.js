@@ -7,7 +7,7 @@ const path = require('path');
 const { Workspace } = require('../out/core/workspace.js');
 const { generateReview } = require('../out/core/generate.js');
 const { loadFullDiff } = require('../out/core/changes.js');
-const { findUncovered } = require('../out/core/coverage.js');
+const { findCoverage } = require('../out/core/coverage.js');
 
 const model = process.argv[2] || 'claude-sonnet-5-5';
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'explainyourself-e2e-'));
@@ -81,7 +81,7 @@ fs.copyFileSync(path.join(__dirname, 'e2e-fixtures', 'report.ts'), path.join(dir
 		for (const s of c.sections) {
 			const nr = s.newRange ? `${s.newRange.start}-${s.newRange.end}` : '-';
 			const or = s.oldRange ? `${s.oldRange.start}-${s.oldRange.end}` : '-';
-			console.log(`  * ${s.file} new ${nr} old ${or} [${s.effort ?? '-'}]: ${s.title} — ${s.summary}`);
+			console.log(`  * ${s.file} new ${nr} old ${or} ${s.title} — ${s.summary}`);
 			for (const x of s.concerns ?? []) {
 				console.log(`      check [${x.tag}] ${x.text}`);
 			}
@@ -91,7 +91,7 @@ fs.copyFileSync(path.join(__dirname, 'e2e-fixtures', 'report.ts'), path.join(dir
 		}
 	}
 	await repo.refresh();
-	const uncovered = findUncovered(review, await loadFullDiff(repo), (s) => s.newRange);
+	const uncovered = findCoverage(review, await loadFullDiff(repo), (s) => s.newRange).uncovered;
 	console.log(`\nUncovered changes: ${JSON.stringify(uncovered)}`);
 	console.log(`Repository: ${dir}`);
 })().catch((e) => {

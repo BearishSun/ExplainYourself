@@ -261,6 +261,17 @@ export function withAdjacentBlankLines(hunks: readonly Hunk[], selected: Readonl
 	return result;
 }
 
+/**
+ * Lines that staging sections stages: the changes inside their working tree ranges with the old lines they
+ * replace, the removals inside their HEAD ranges, and the blank lines around both. HEAD ranges add removed
+ * lines only: `selectLines` on the old side also takes the added lines paired with them, and the last old
+ * line of a block takes every surplus added line, which can be the code of the next section.
+ */
+export function selectSections(hunks: readonly Hunk[], newRanges: readonly LineRange[], oldRanges: readonly LineRange[]): Set<DiffLine> {
+	const removed = [...selectLines(hunks, oldRanges, 'old')].filter((l) => l.type === '-');
+	return withAdjacentBlankLines(hunks, new Set([...selectLines(hunks, newRanges, 'new'), ...removed]));
+}
+
 /** Finds hunks touching any of the ranges on the given side. Pure removals match the line after them. */
 export function hunksInRanges(hunks: readonly Hunk[], ranges: readonly LineRange[], side: 'old' | 'new'): Hunk[] {
 	return hunks.filter((h) => {

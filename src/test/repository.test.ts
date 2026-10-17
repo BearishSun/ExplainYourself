@@ -6,16 +6,18 @@ import * as path from 'path';
 import { test } from 'node:test';
 import { runCost } from '../core/agent';
 import { LineMap, matchLines } from '../core/anchors';
-import { changedLines, deriveOldRange } from '../core/coverage';
+import { changedLines, deriveOldRange, findCoverage, snapSections } from '../core/coverage';
 import { DiffLine, mapLine, parseDiff } from '../core/diff';
 import { buildChangeSet } from '../core/changes';
 import { reviewDelta } from '../core/generate';
+import { needsAgent, planUpdate, renderUpdate } from '../core/update';
 import { Repository } from '../core/repository';
 import { findInstructionFiles, loadGuidance, DEFAULT_REVIEW_RULES, repositoryRulesFile } from '../core/guidance';
 import { buildPrompt } from '../core/prompt';
+import { findSessions, REVIEW_PROMPT_START, REVIEW_SESSION_NAME } from '../core/sessions';
 import { adoptSnapshot, computeFingerprints, loadReview, loadSnapshot, mergeUpdate, normalizeReview, Review, saveReview, saveSnapshots } from '../core/review';
 import { Workspace } from '../core/workspace';
-import { applyForward, applyReverse, selectHunks, selectLines, withAdjacentBlankLines } from '../core/stager';
+import { applyForward, applyReverse, selectHunks, selectLines, selectSections, withAdjacentBlankLines } from '../core/stager';
 
 function sh(cwd: string, ...args: string[]): string {
 	return execFileSync('git', args, { cwd, encoding: 'latin1' });
@@ -241,9 +243,9 @@ test('deriveOldRange maps a rewritten function back to HEAD', () => {
 	assert.strictEqual(deriveOldRange(d.hunks, { start: 14, end: 15 }), undefined);
 });
 
-test('mergeUpdate replaces sections of changed files only', async () => {
-	const section = (id: string, file: string, start: number) => ({ id, file, title: id, summary: '', newRange: { start, end: start } });
-	const previous: Review = {
+test('mergeUpdate changes, moves, removes and adds sections by id', async () => {
+	const section = (id: string, file: string, start: number, end = start) => ({ id, file, title: id, summary: `${id} summary`, newRange: { start, end } });
+	const base: Review = {
 		version: 1,
 		generatedAt: '',
 		head: 'h',
@@ -251,70 +253,110 @@ test('mergeUpdate replaces sections of changed files only', async () => {
 		overview: 'old overview',
 		fingerprints: {},
 		categories: [
-			{ id: 'c1', title: 'One', oldBehavior: 'o', newBehavior: 'n', sections: [section('c1s1', 'a.ts', 1), section('c1s2', 'b.ts', 2)] },
-			{ id: 'c2', title: 'Two', oldBehavior: 'o', newBehavior: 'n', sections: [section('c2s1', 'b.ts', 5)] }
+			{ id: 'c1', title: 'One', oldBehavior: 'o', newBehavior: 'n', sections: [section('c1s1', 'a.ts', 1, 3), section('c1s2', 'b.ts', 5, 6)] },
+			{ id: 'c2', title: 'Two', oldBehavior: 'o', newBehavior: 'n', sections: [section('c2s1', 'b.ts', 8, 9), section('c2s2', 'c.ts', 1, 2)] },
+			{ id: 'c3', title: 'Three', oldBehavior: 'o', newBehavior: 'n', sections: [section('c3s1', 'd.ts', 1)] }
 		]
 	};
 	const raw = {
 		categories: [
-			{ id: 'c1', title: 'One updated', oldBehavior: 'o2', newBehavior: 'n2', sections: [{ file: 'b.ts', title: 'new b', summary: 's', newStart: 7, newEnd: 8 }] },
-			{ title: 'Three', oldBehavior: 'o3', newBehavior: 'n3', sections: [{ file: 'b.ts', title: 'b3', summary: 's', newStart: 1, newEnd: 1, layout: 'rewrite' }] }
+			{
+				id: 'c1',
+				sections: [{ id: 'c1s1', summary: 'changed' }, { id: 'c1s2', remove: true }, { file: 'a.ts', title: 'new a', summary: 's', newStart: 5, newEnd: 6 }]
+			},
+			// c3s1 moves here, which leaves c3 empty.
+			{ id: 'c2', newBehavior: 'n2', sections: [{ id: 'c3s1', newStart: 2, newEnd: 3 }] },
+			{ title: 'New', oldBehavior: 'o', newBehavior: 'n', before: 'c2', sections: [{ file: 'c.ts', title: 'c again', summary: 's', newStart: 4, newEnd: 5 }] }
 		]
 	};
-	const { review, errors } = await mergeUpdate(previous, raw, new Set(['b.ts']), { head: 'h2', source: previous.source, lineCount: async () => 10 });
+	// c.ts was reviewed again in full: its section the output leaves out is gone.
+	const { review, errors } = await mergeUpdate(base, raw, new Set(['c.ts']), { head: 'h2', source: base.source, lineCount: async () => 10 });
 	assert.deepStrictEqual(errors, []);
-	assert.deepStrictEqual(review.categories.map((c) => c.id), ['c1', 'c3']);
-	assert.strictEqual(review.categories[0].title, 'One updated');
-	assert.deepStrictEqual(review.categories[0].sections.map((s) => [s.id, s.file]), [['c1s1', 'a.ts'], ['c1s2', 'b.ts']]);
-	assert.deepStrictEqual(review.categories[0].sections[1].newRange, { start: 7, end: 8 });
-	assert.strictEqual(review.categories[1].sections[0].layout, 'rewrite');
+	assert.deepStrictEqual(
+		review.categories.map((c) => [c.id, c.title, c.newBehavior, c.sections.map((x) => x.id)]),
+		[
+			['c1', 'One', 'n', ['c1s1', 'c1s3']],
+			['c4', 'New', 'n', ['c4s1']],
+			['c2', 'Two', 'n2', ['c2s1', 'c3s1']]
+		]
+	);
+	const c1s1 = review.categories[0].sections[0];
+	assert.deepStrictEqual([c1s1.title, c1s1.summary, c1s1.newRange], ['c1s1', 'changed', { start: 1, end: 3 }], 'fields left out keep their value');
+	assert.deepStrictEqual(review.categories[2].sections[1].newRange, { start: 2, end: 3 });
 	assert.strictEqual(review.overview, 'old overview');
 	assert.strictEqual(review.head, 'h2');
+
+	const bad = await mergeUpdate(base, { categories: [{ sections: [{ file: 'x.ts', title: 'x', summary: 's', newStart: 1 }] }] }, new Set(), { head: 'h', source: base.source, lineCount: async () => 10 });
+	assert.deepStrictEqual(bad.errors, ['New category 1: needs title, oldBehavior and newBehavior.']);
 });
 
-test('mergeUpdate keeps the reading order', async () => {
-	const section = (id: string, file: string) => ({ id, file, title: id, summary: '', newRange: { start: 1, end: 1 } });
-	const previous: Review = {
+test('planUpdate sends only the sections that edits touch, and edited code outside sections', async () => {
+	const body = Array.from({ length: 40 }, (_, i) => `line ${i + 1}`);
+	const dir = makeRepo({ 'f.ts': lines(...body) });
+	const reviewed = [...body];
+	reviewed[4] = 'line 5 changed';
+	reviewed[24] = 'line 25 changed';
+	write(dir, 'f.ts', lines(...reviewed));
+	const repo = await Workspace.open(dir);
+	const changes = await buildChangeSet(repo);
+	const fingerprints = await computeFingerprints(dir, ['f.ts']);
+	await saveSnapshots(repo.gitDir, dir, ['f.ts'], fingerprints);
+	const section = (id: string, start: number, end: number) => ({ id, file: 'f.ts', title: id, summary: '', newRange: { start, end }, notes: [{ line: start + 1, text: 'n' }] });
+	const review: Review = {
 		version: 1,
 		generatedAt: '',
-		head: 'h',
+		head: repo.head,
 		source: { kind: 'fresh' },
 		overview: '',
-		fingerprints: {},
-		categories: [
-			{ id: 'c1', title: 'Utilities', oldBehavior: 'o', newBehavior: 'n', sections: [section('c1s1', 'a.ts'), section('c1s2', 'b.ts'), section('c1s3', 'c.ts')] },
-			{ id: 'c2', title: 'Tests', oldBehavior: 'o', newBehavior: 'n', sections: [section('c2s1', 't.ts')] }
-		]
+		files: ['f.ts'],
+		fingerprints,
+		categories: [{ id: 'c1', title: 'C', oldBehavior: '', newBehavior: '', sections: [section('c1s1', 3, 7), section('c1s2', 23, 27)] }]
 	};
-	const s = (file: string, title: string, extra = {}) => ({ file, title, summary: 's', newStart: 1, newEnd: 1, ...extra });
-	const raw = {
-		categories: [
-			// b.ts keeps its place between a.ts and c.ts; d.ts asks to go before a.ts.
-			{ id: 'c1', title: 'Utilities', oldBehavior: 'o', newBehavior: 'n', sections: [s('b.ts', 'b again', { effort: 'high' }), s('d.ts', 'd', { before: 'c1s1' })] },
-			// A new category asks to go before the tests.
-			{ title: 'Feature', before: 'c2', oldBehavior: 'o', newBehavior: 'n', sections: [s('e.ts', 'e')] }
-		]
-	};
-	const { review, errors } = await mergeUpdate(previous, raw, new Set(['b.ts', 'd.ts', 'e.ts']), { head: 'h', source: previous.source, lineCount: async () => 10 });
-	assert.deepStrictEqual(errors, []);
-	assert.deepStrictEqual(review.categories.map((c) => c.title), ['Utilities', 'Feature', 'Tests']);
-	assert.deepStrictEqual(review.categories[0].sections.map((x) => x.file), ['d.ts', 'a.ts', 'b.ts', 'c.ts']);
-	assert.strictEqual(review.categories[0].sections[2].effort, 'high');
-	assert.ok(review.categories.every((c) => c.sections.every((x) => !('insertBefore' in x))), 'placement hints are not stored');
-	assert.strictEqual(new Set(review.categories.flatMap((c) => c.sections.map((x) => x.id))).size, 6, 'section ids stay unique');
+
+	// Since the review: two lines added at the top, line 6 (inside c1s1) edited, and new code after line 35.
+	const now = ['top 1', 'top 2', ...reviewed];
+	now[2 + 5] = 'line 6 edited';
+	now.splice(2 + 35, 0, 'new 1', 'new 2');
+	write(dir, 'f.ts', lines(...now));
+	const current = await buildChangeSet(repo);
+	const delta = await reviewDelta(repo, review, current);
+	assert.deepStrictEqual(delta, [{ path: 'f.ts', reason: 'modified' }]);
+
+	const plan = await planUpdate(repo, review, delta!, current);
+	assert.ok(needsAgent(plan));
+	assert.deepStrictEqual([...plan.affected], ['c1s1']);
+	const [s1, s2] = plan.base.categories[0].sections;
+	assert.deepStrictEqual([s1.newRange, s2.newRange, s2.notes], [{ start: 5, end: 9 }, { start: 25, end: 29 }, [{ line: 26, text: 'n' }]], 'positions follow the edits');
+	assert.deepStrictEqual(plan.uncovered, [
+		{ file: 'f.ts', range: { start: 1, end: 2 } },
+		{ file: 'f.ts', range: { start: 38, end: 39 } }
+	]);
+	assert.deepStrictEqual(review.categories[0].sections[1].newRange, { start: 23, end: 27 }, 'the previous review is not modified');
+
+	const text = renderUpdate(plan, current);
+	assert.ok(text.includes('     8 +| line 6 edited') && text.includes('- c1s1 in category c1') && !text.includes('- c1s2 in category'), text);
+	assert.ok(text.includes('Edited code that no section covers: lines 1-2, lines 38-39.'), text);
+
+	// Without the edit inside c1s1 and the new code, only the lines at the top remain for the agent.
+	write(dir, 'f.ts', lines(...['top 1', 'top 2', ...reviewed]));
+	const moved = await buildChangeSet(repo);
+	const movedPlan = await planUpdate(repo, review, (await reviewDelta(repo, review, moved))!, moved);
+	assert.deepStrictEqual([movedPlan.affected.size, movedPlan.uncovered.length], [0, 1], 'added lines at the top differ from HEAD');
 });
 
 test('changedLines counts the changes inside a section', () => {
 	const [d] = parseDiff('diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -3,2 +3,3 @@\n-a\n-b\n+A\n+B\n+C\n@@ -20 +21,0 @@\n-gone\n@@ -30,0 +30,2 @@\n+x\n+y\n');
 	// Lines 1-10 hold the first hunk: 3 added, and its 2 removed lines.
-	assert.deepStrictEqual(changedLines(d, { start: 1, end: 10 }, undefined), { added: 3, removed: 2 });
+	assert.deepStrictEqual(changedLines(d, { start: 1, end: 10 }, undefined), { added: 3, removed: 2, changed: 3 });
+	// Only part of a replacement lies inside the range: the section owns the replaced lines paired with its own.
+	assert.deepStrictEqual(changedLines(d, { start: 3, end: 3 }, undefined), { added: 1, removed: 1, changed: 1 });
 	// Only part of an addition lies inside the range.
-	assert.deepStrictEqual(changedLines(d, { start: 31, end: 40 }, undefined), { added: 1, removed: 0 });
+	assert.deepStrictEqual(changedLines(d, { start: 31, end: 40 }, undefined), { added: 1, removed: 0, changed: 1 });
 	// A removal found through the old range.
-	assert.deepStrictEqual(changedLines(d, undefined, { start: 18, end: 22 }), { added: 0, removed: 1 });
+	assert.deepStrictEqual(changedLines(d, undefined, { start: 18, end: 22 }), { added: 0, removed: 1, changed: 1 });
 	// Untracked files count every line of the range as added; unchanged files count nothing.
-	assert.deepStrictEqual(changedLines({ oldPath: null, newPath: 'n', path: 'n', binary: false, hunks: [] }, { start: 5, end: 9 }, undefined), { added: 5, removed: 0 });
-	assert.deepStrictEqual(changedLines(undefined, { start: 1, end: 3 }, undefined), { added: 0, removed: 0 });
+	assert.deepStrictEqual(changedLines({ oldPath: null, newPath: 'n', path: 'n', binary: false, hunks: [] }, { start: 5, end: 9 }, undefined), { added: 5, removed: 0, changed: 5 });
+	assert.deepStrictEqual(changedLines(undefined, { start: 1, end: 3 }, undefined), { added: 0, removed: 0, changed: 0 });
 });
 
 test('reviewDelta finds modified, added and removed files', async () => {
@@ -577,4 +619,94 @@ test('guidance: repository rules override the defaults; instruction files on the
 	const changes = { annotatedPath: 'changes.txt', files: [], submodules: [] } as unknown as Parameters<typeof buildPrompt>[1];
 	const prompt = buildPrompt(dir, changes, { kind: 'session' }, custom);
 	assert.ok(prompt.includes('**Naming**: no abbreviations.') && prompt.includes('- CLAUDE.md') && prompt.includes('- Other/CLAUDE.md'));
+});
+
+test('findCoverage: cut-off hunk lines and whitespace go to the nearest section, distant code stays uncovered', () => {
+	// Hunks: 3-6 replaced (section covers 1-4 of it), a blank line added at 40, code added at 60-61.
+	const [d] = parseDiff('diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -3,4 +3,4 @@\n-a\n-b\n-c\n-d\n+A\n+B\n+C\n+D\n@@ -38,0 +39 @@\n+\n@@ -55,0 +60,2 @@\n+x\n+y\n');
+	const section = { id: 's', file: 'f', title: 'S', summary: '', newRange: { start: 1, end: 4 } };
+	const review = { categories: [{ id: 'c', title: 'C', oldBehavior: '', newBehavior: '', sections: [section] }] } as unknown as Review;
+	const { uncovered, attached } = findCoverage(review, new Map([['f', d]]), (x) => x.newRange);
+	assert.deepStrictEqual(
+		attached.get('s')!.map((c) => [c.newRange, c.oldRange]),
+		[
+			[{ start: 5, end: 6 }, { start: 5, end: 6 }],
+			[{ start: 39, end: 39 }, undefined]
+		]
+	);
+	assert.deepStrictEqual(uncovered.map((c) => c.newRange), [{ start: 60, end: 61 }]);
+});
+
+test('staging a section with a nearby change leaves the next section unstaged', async () => {
+	const dir = makeRepo({ 'f.cpp': lines('void a()', '{', '\told();', '}', 'end') });
+	// One block: a()'s body and closing line change, and b() follows right after.
+	write(dir, 'f.cpp', lines('void a()', '{', '\tnew();', '} // a', 'void b()', '{', '\tb();', '} // b', 'end'));
+	const repo = await Repository.open(dir);
+	await repo.refresh();
+	// Section a() misses its closing line, which then joins it as a nearby change.
+	const a = { id: 'a', file: 'f.cpp', title: 'a', summary: '', newRange: { start: 1, end: 3 } };
+	const b = { id: 'b', file: 'f.cpp', title: 'b', summary: '', newRange: { start: 5, end: 8 } };
+	const review = { categories: [{ id: 'c', title: 'C', oldBehavior: '', newBehavior: '', sections: [a, b] }] } as unknown as Review;
+	const { attached } = findCoverage(review, repo.unstaged, (x) => x.newRange);
+	const nearby = attached.get('a')!;
+	assert.deepStrictEqual(nearby.map((c) => [c.newRange, c.oldRange]), [[{ start: 4, end: 4 }, { start: 4, end: 4 }]]);
+
+	const newRanges = [a.newRange, ...nearby.map((c) => c.newRange!)];
+	const oldRanges = nearby.map((c) => c.oldRange!);
+	await repo.stageSelections([{ rel: 'f.cpp', select: (d) => selectSections(d.hunks, newRanges, oldRanges) }], 'Stage section');
+	assert.strictEqual(indexContent(dir, 'f.cpp'), lines('void a()', '{', '\tnew();', '} // a', 'end'));
+});
+
+test('findSessions leaves out review sessions, but not coding sessions that ran the review skill', async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), 'explainyourself-repo-'));
+	const config = fs.mkdtempSync(path.join(os.tmpdir(), 'explainyourself-claude-'));
+	const project = path.join(config, 'projects', 'p');
+	fs.mkdirSync(project, { recursive: true });
+	const user = (text: string) => JSON.stringify({ type: 'user', cwd: root, message: { content: [{ type: 'text', text }] } });
+	const edit = JSON.stringify({ parentUuid: null, type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Edit', input: { file_path: path.join(root, 'a.ts') } }] } });
+	const toolResult = (text: string) => JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', content: text }] } });
+	const transcripts: Record<string, string[]> = {
+		coding: [user('Add a feature'), edit],
+		// Forks of the coding session: the same edits, then the review prompt; newer sessions are also named.
+		named: [user('Add a feature'), edit, JSON.stringify({ type: 'custom-title', customTitle: REVIEW_SESSION_NAME, sessionId: 'named' })],
+		unnamed: [user('Add a feature'), edit, user(`${REVIEW_PROMPT_START} A human reviewer will read your categories.`)],
+		// The /explain-yourself skill prints the prompt as a tool result in the coding session itself.
+		skill: [user('Fix a bug'), edit, toolResult(`${REVIEW_PROMPT_START} A human reviewer will read your categories.`)]
+	};
+	for (const [name, lines] of Object.entries(transcripts)) {
+		fs.writeFileSync(path.join(project, `${name}.jsonl`), lines.join('\n') + '\n');
+	}
+
+	const previous = process.env.CLAUDE_CONFIG_DIR;
+	process.env.CLAUDE_CONFIG_DIR = config;
+	try {
+		const sessions = await findSessions(root, ['a.ts'], 1);
+		assert.deepStrictEqual(sessions.map((s) => s.sessionId).sort(), ['coding', 'skill']);
+	} finally {
+		if (previous === undefined) {
+			delete process.env.CLAUDE_CONFIG_DIR;
+		} else {
+			process.env.CLAUDE_CONFIG_DIR = previous;
+		}
+	}
+});
+
+test('snapSections moves section edges out to their block of added lines, but not past other sections or code', () => {
+	// Lines 10-19 added: a doc comment (10-13), f() (14-16), a blank line (17), g() (18-19). Lines 40-45: code before h() (40-43), h() (44-45).
+	const added = ['/**', ' * Does f.', ' * @return Nothing.', ' */', 'void f()', '{', '}', '', 'void g()', '{'];
+	const more = ['int a = 1;', 'int b = 2;', 'int c = 3;', 'int d = 4;', 'void h()', '{'];
+	const body = (start: number, lines: string[]) => `@@ -${start - 1},0 +${start},${lines.length} @@\n${lines.map((l) => `+${l}\n`).join('')}`;
+	const [d] = parseDiff(`diff --git a/f b/f\n--- a/f\n+++ b/f\n${body(10, added)}${body(40, more)}`);
+	const section = (id: string, start: number, end: number) => ({ id, file: 'f', title: id, summary: '', newRange: { start, end } });
+	const f = section('f', 12, 15);
+	const g = section('g', 18, 19);
+	const h = section('h', 44, 45);
+	const review = { categories: [{ id: 'c', title: 'C', oldBehavior: '', newBehavior: '', sections: [f, g, h] }] } as unknown as Review;
+	const messages = snapSections(review, new Map([['f', d]]));
+	// f() starts inside its doc comment and ends before its brace; g() follows a blank line that f() takes.
+	assert.deepStrictEqual(f.newRange, { start: 10, end: 17 });
+	assert.deepStrictEqual(g.newRange, { start: 18, end: 19 });
+	// h() is preceded by four lines of code: not a miscount, so it stays.
+	assert.deepStrictEqual(h.newRange, { start: 44, end: 45 });
+	assert.strictEqual(messages.length, 2);
 });

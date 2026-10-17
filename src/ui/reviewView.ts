@@ -2,7 +2,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { LineRange } from '../core/diff';
 import { changedLines } from '../core/coverage';
-import { Effort, ReviewSection } from '../core/review';
+import { ReviewSection } from '../core/review';
 import { ClaudeAccount } from './claude';
 import { AppState } from './state';
 import { log } from './util';
@@ -90,6 +90,13 @@ export class ReviewView implements vscode.WebviewViewProvider {
 	}
 
 	/** Reveals a section card in the view. */
+	/** Scrolls the panel to a section when the panel is open, without opening it. */
+	follow(sectionId: string): void {
+		if (this.view?.visible) {
+			this.view.webview.postMessage({ type: 'reveal', sectionId });
+		}
+	}
+
 	reveal(sectionId: string): void {
 		this.view?.show(true);
 		this.view?.webview.postMessage({ type: 'reveal', sectionId });
@@ -119,11 +126,11 @@ export class ReviewView implements vscode.WebviewViewProvider {
 					summary: sec.summary,
 					lines: rangeLabel(range, sec),
 					status,
-					rewrite: s.isRewrite(sec),
 					comparable: !!range && !!s.compareOldRange(sec) && s.headPath(sec) !== null,
-					...effortOf(sec, changedLines(s.fullDiffs.get(sec.file), range, sec.oldRange)),
+					...changedLines(s.fullDiffs.get(sec.file), range, sec.oldRange),
 					related: s.relatedSections(sec).map((r) => ({ id: r.id, file: r.file, lines: rangeLabel(s.newRange(r), r) })),
-					concerns: sec.concerns ?? []
+					concerns: sec.concerns ?? [],
+					nearby: s.attached.get(sec.id)?.length ?? 0
 				};
 			});
 			const counted = sections.filter((x) => x.status !== 'context');
@@ -135,7 +142,10 @@ export class ReviewView implements vscode.WebviewViewProvider {
 				concerns: c.concerns ?? [],
 				sections,
 				staged: counted.filter((x) => x.status === 'staged').length,
-				total: counted.length
+				total: counted.length,
+				added: counted.reduce((n, x) => n + x.added, 0),
+				changed: counted.reduce((n, x) => n + x.changed, 0),
+				removed: counted.reduce((n, x) => n + x.removed, 0)
 			};
 		});
 
@@ -177,13 +187,6 @@ export class ReviewView implements vscode.WebviewViewProvider {
 			}
 		});
 	}
-}
-
-/** The agent's effort rating, or one estimated from the size when the review has none. */
-function effortOf(section: ReviewSection, changed: { added: number; removed: number }): { effort: Effort; estimated: boolean; added: number; removed: number } {
-	const total = changed.added + changed.removed;
-	const estimated: Effort = total <= 15 ? 'low' : total <= 60 ? 'medium' : 'high';
-	return { effort: section.effort ?? estimated, estimated: !section.effort, ...changed };
 }
 
 function rangeLabel(range: LineRange | undefined, section: ReviewSection): string {

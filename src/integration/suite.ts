@@ -36,7 +36,7 @@ async function waitFor<T>(fn: () => T | undefined | false, what: string, ms = 10
 
 /** Opens an existing reviewed repository and leaves a representative screen for a screenshot. */
 async function demo(out: string): Promise<void> {
-	const ext = vscode.extensions.getExtension<ExplainYourselfApi>('explainyourself.explain-yourself')!;
+	const ext = vscode.extensions.getExtension<ExplainYourselfApi>('MarkoPintera.explain-yourself')!;
 	const { state } = await ext.activate();
 	await waitFor(() => state.review, 'review');
 	await vscode.workspace.getConfiguration('diffEditor').update('renderSideBySide', true, vscode.ConfigurationTarget.Global);
@@ -60,7 +60,7 @@ export async function run(): Promise<void> {
 	const root = vscode.workspace.workspaceFolders![0].uri.fsPath;
 	const git = (...args: string[]) => execFileSync('git', args, { cwd: root, encoding: 'utf8' });
 	try {
-		const ext = vscode.extensions.getExtension<ExplainYourselfApi>('explainyourself.explain-yourself')!;
+		const ext = vscode.extensions.getExtension<ExplainYourselfApi>('MarkoPintera.explain-yourself')!;
 		const api = await ext.activate();
 		const state = api.state;
 		await waitFor(() => state.repo && state.repo.status.length > 0, 'repository');
@@ -175,7 +175,7 @@ export async function run(): Promise<void> {
 					title: 'Rewrite',
 					oldBehavior: 'Old block.',
 					newBehavior: 'New block.',
-					sections: [{ id: 'c3s1', file: 'a.txt', title: 'Block 18-22', summary: 'Rewritten block.', newRange: { start: 18, end: 22 }, layout: 'rewrite' }]
+					sections: [{ id: 'c3s1', file: 'a.txt', title: 'Block 18-22', summary: 'Rewritten block.', newRange: { start: 18, end: 22 } }]
 				}
 			]
 		};
@@ -197,10 +197,14 @@ export async function run(): Promise<void> {
 		await vscode.commands.executeCommand('explainYourself.undo');
 		check(git('cat-file', 'blob', ':a.txt') === indexBefore, 'undo unstages it');
 
-		// Old/new comparison of a rewritten section.
-		check(state.isRewrite(state.findSection('c3s1')!.section) && !state.isRewrite(state.findSection('c1s1')!.section), 'rewrite detection');
+		// Old/new comparison of a section, which opens only on request.
 		check(JSON.stringify(state.compareOldRange(state.findSection('c3s1')!.section)) === JSON.stringify({ start: 18, end: 22 }), 'derived old range');
 		await vscode.commands.executeCommand('explainYourself.openSection', 'c3s1');
+		check(
+			await waitFor(() => vscode.window.tabGroups.activeTabGroup.activeTab?.input instanceof vscode.TabInputTextDiff, 'section opens as a diff', 3000).then(() => true, () => false),
+			'section opens as a diff'
+		);
+		await vscode.commands.executeCommand('explainYourself.compareSection', 'c3s1');
 		const isCompareDoc = (e: vscode.TextEditor) => e.document.uri.scheme === 'explainyourself' && e.document.uri.query.includes('"compare"');
 		const leftEditor = await waitFor(() => vscode.window.visibleTextEditors.find(isCompareDoc), 'compare HEAD editor');
 		const rightEditor = await waitFor(
@@ -234,29 +238,47 @@ export async function run(): Promise<void> {
 		await vscode.window.showTextDocument(pairEditor.document, { viewColumn: pairEditor.viewColumn, selection: new vscode.Range(4, 0, 4, 0) });
 		const noteThreads = () => api.diffs.threadsOf(pairEditor.document.uri).filter((t) => t.note).map((t) => t.line);
 		await waitFor(() => noteThreads().length > 0, 'note thread', 3000).catch(() => undefined);
-		check(JSON.stringify(noteThreads()) === '[18]', `note shown above its line (${JSON.stringify(api.diffs.threadsOf(pairEditor.document.uri))})`);
+		check(JSON.stringify(noteThreads()) === '[18]', `note shown above its line (${JSON.stringify(api.diffs.threadsOf(pairEditor.document.uri).map(({ line, note }) => ({ line, note })))})`);
 		await vscode.commands.executeCommand('explainYourself.goToRelated');
 		await waitFor(() => vscode.window.activeTextEditor?.document.uri.fsPath.endsWith('b.txt'), 'go to related opens b.txt');
 		check(true, 'go to related opens the other section');
 		await vscode.commands.executeCommand('explainYourself.goToRelated');
 		await waitFor(() => vscode.window.activeTextEditor?.document.uri.fsPath.endsWith('a.txt'), 'go to related returns to a.txt');
 		check(vscode.window.activeTextEditor!.selection.active.line === 3, `returned to the section start (line ${vscode.window.activeTextEditor!.selection.active.line + 1})`);
+		// In the diff, section lines are highlighted; overlapping sections merge into one range.
+		const diffUri = vscode.window.activeTextEditor!.document.uri;
+		await waitFor(() => api.diffs.highlightsOf(diffUri).length > 0, 'highlights', 3000).catch(() => undefined);
+		const highlighted = JSON.stringify(api.diffs.highlightsOf(diffUri));
+		check(highlighted === JSON.stringify([{ start: 4, end: 6 }, { start: 18, end: 22 }]), `section lines highlighted (${highlighted})`);
 
 		await vscode.commands.executeCommand('explainYourself.stageSection', 'c1s2');
 		await waitFor(() => state.sectionStatus(state.findSection('c1s2')!.section) === 'staged', 'section staged', 3000);
 		check(state.sectionStatus(state.findSection('c1s1')!.section) === 'pending', 'other section still pending');
+		// Staging jumps to the next section with unstaged changes: c2s1 in b.txt.
+		await waitFor(() => vscode.window.activeTextEditor?.document.uri.fsPath.endsWith('b.txt'), 'jump to the next section', 3000).catch(() => undefined);
+		check(!!vscode.window.activeTextEditor?.document.uri.fsPath.endsWith('b.txt'), 'staging a section opens the next one');
 
 		await vscode.commands.executeCommand('explainYourself.stageCategory', 'c2');
 		check(git('ls-files', 'b.txt').trim() === 'b.txt', 'untracked file staged through its category');
 		check(git('cat-file', 'blob', ':b.txt') === 'b1\nb2\n', 'untracked file content staged');
+		await vscode.commands.executeCommand('explainYourself.openSection', 'c1s1');
+		await waitFor(() => vscode.window.visibleTextEditors.some((e) => e.document.uri.scheme === 'file' && e.document.uri.fsPath.endsWith('a.txt')), 'a.txt diff again');
 
 		// Editing above a section shifts its range.
 		// The comparison closed the original editor; use the one the diff shows now.
 		const aEditor = vscode.window.visibleTextEditors.find((e) => e.document.uri.scheme === 'file' && e.document.uri.fsPath.endsWith('a.txt'))!;
 		const c1s2 = () => state.findSection('c1s2')!.section;
+		const threadsBefore = api.diffs.threadsOf(aEditor.document.uri);
 		await aEditor.edit((e) => e.insert(new vscode.Position(0, 0), 'inserted\n'));
 		await waitFor(() => state.newRange(c1s2())!.start === 20, 'section range follows edits', 3000).catch(() => undefined);
 		check(state.newRange(c1s2())!.start === 20 && state.notes(c1s2())[0].line === 21, `section range and note follow edits (${JSON.stringify([state.newRange(c1s2()), state.notes(c1s2())])})`);
+		// Threads move in place; replacing them makes the editor jump.
+		await waitFor(() => api.diffs.threadsOf(aEditor.document.uri)[0]?.line !== threadsBefore[0]?.line, 'threads move', 3000).catch(() => undefined);
+		const threadsAfter = api.diffs.threadsOf(aEditor.document.uri);
+		check(
+			threadsBefore.length > 0 && threadsAfter.length === threadsBefore.length && threadsAfter.every((t, i) => t.thread === threadsBefore[i].thread && t.line === threadsBefore[i].line + 1),
+			`comment threads move in place (${JSON.stringify(threadsBefore.map((t) => t.line))} -> ${JSON.stringify(threadsAfter.map((t) => t.line))})`
+		);
 		await vscode.commands.executeCommand('undo');
 		await waitFor(() => state.newRange(c1s2())!.start === 19, 'undo moves the range back', 3000).catch(() => undefined);
 		check(state.newRange(c1s2())!.start === 19, 'range moves back after undo');

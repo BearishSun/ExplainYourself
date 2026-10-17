@@ -104,6 +104,18 @@ pkg.contributes = {
 		{ command: 'explainYourself.undo', key: 'ctrl+alt+z', mac: 'cmd+alt+z', when: 'explainYourself.editorView || focusedView == explainYourself.changes || focusedView == explainYourself.review' },
 		{ command: 'explainYourself.redo', key: 'ctrl+alt+y', mac: 'cmd+alt+shift+z', when: 'explainYourself.editorView || focusedView == explainYourself.changes || focusedView == explainYourself.review' }
 	],
+	colors: [
+		{
+			id: 'explainYourself.sectionBackground',
+			description: 'Background of the lines a review section covers in diffs. Keep it faint: the diff colors show the changes.',
+			defaults: { dark: '#ffffff0d', light: '#0000000a', highContrast: '#ffffff0d', highContrastLight: '#0000000a' }
+		},
+		{
+			id: 'explainYourself.sectionBorder',
+			description: 'Bar along the left edge of the lines a review section covers in diffs. It stays visible over the diff colors.',
+			defaults: { dark: '#ffffff59', light: '#00000040', highContrast: '#ffffffa0', highContrastLight: '#00000080' }
+		}
+	],
 	configuration: {
 		title: 'ExplainYourself',
 		properties: {
@@ -114,8 +126,9 @@ pkg.contributes = {
 			'explainYourself.diffAlgorithm': { type: 'string', enum: ['histogram', 'patience', 'myers', 'minimal'], default: 'histogram', description: 'Diff algorithm used to compute hunks.' },
 			'explainYourself.showSummaries': { type: 'boolean', default: true, description: 'Show section summaries inline in diffs.' },
 			'explainYourself.summariesExpanded': { type: 'boolean', default: true, description: 'Expand inline section summaries by default.' },
+			'explainYourself.jumpToNextSection': { type: 'boolean', default: true, description: 'After staging a section, open the next section that still has unstaged changes.' },
+			'explainYourself.highlightSections': { type: 'boolean', default: true, description: 'Shade the lines each review section covers in diffs, with the nearby changes staged along with it. Change the colors with the explainYourself.sectionBackground and explainYourself.sectionBorder theme colors.' },
 			'explainYourself.codeLens': { type: 'boolean', default: true, description: 'Show "Stage hunk" / "Unstage hunk" CodeLenses in diffs.' },
-			'explainYourself.openRewritesSideBySide': { type: 'boolean', default: true, description: 'Open mostly rewritten sections as their complete old and new versions side by side instead of as a diff.' },
 			'explainYourself.plainCompare': { type: 'boolean', default: false, description: 'Hide highlights, summaries and CodeLenses in the old ↔ new comparison.' },
 			'explainYourself.stageFromEditors': { type: 'boolean', default: false, description: 'Also allow staging, and show hunk CodeLenses, in plain editors of repository files.' }
 		}

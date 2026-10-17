@@ -23,6 +23,11 @@ export function claudeProjectsDir(): string {
 	return path.join(claudeConfigDir(), 'projects');
 }
 
+/** Name of the sessions the review agent runs in. */
+export const REVIEW_SESSION_NAME = 'ExplainYourself review';
+/** First words of every review prompt, also of review sessions started before they were named. */
+export const REVIEW_PROMPT_START = 'You are preparing a guided code review.';
+
 const FILE_PATH = /"(?:file_path|notebook_path)":"((?:[^"\\]|\\.)*)"/g;
 const EDIT_TOOLS = /"name":"(?:Edit|Write|MultiEdit|NotebookEdit)"/;
 
@@ -44,6 +49,21 @@ function firstUserText(event: Record<string, unknown>): string | null {
 	return null;
 }
 
+/** True for a line that is a review prompt sent to the review agent, not one shown in a tool result. */
+function isReviewPrompt(line: string): boolean {
+	try {
+		const event = JSON.parse(line) as Record<string, unknown>;
+		return event.type === 'user' && !!firstUserText(event)?.startsWith(REVIEW_PROMPT_START);
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Reads a transcript: where it ran, its title and the changed files it edited. Returns null for sessions that
+ * edited none of them, and for review sessions: they are forks of the coding session, so they hold the same
+ * edits, and forking one would hand the new review agent the previous reviews.
+ */
 async function scanTranscript(file: string, root: string, changed: Map<string, string>): Promise<Omit<SessionCandidate, 'lastActive' | 'transcript'> | null> {
 	const editedFiles: Record<string, number> = {};
 	let cwd: string | null = null;
@@ -52,8 +72,13 @@ async function scanTranscript(file: string, root: string, changed: Map<string, s
 	let userEventsLeft = 50;
 	const rootPrefix = normalize(root) + path.sep;
 
-	const lines = createInterface({ input: createReadStream(file, { encoding: 'utf8' }), crlfDelay: Infinity });
+	const input = createReadStream(file, { encoding: 'utf8' });
+	const lines = createInterface({ input, crlfDelay: Infinity });
 	for await (const line of lines) {
+		if (line.includes(`"customTitle":"${REVIEW_SESSION_NAME}"`) || (line.includes(REVIEW_PROMPT_START) && isReviewPrompt(line))) {
+			input.destroy();
+			return null;
+		}
 		if ((!cwd || !title) && userEventsLeft > 0) {
 			if (line.includes('"cwd"') || line.includes('"type":"user"')) {
 				userEventsLeft--;
@@ -111,8 +136,8 @@ async function scanTranscript(file: string, root: string, changed: Map<string, s
 }
 
 /**
- * Finds recent Claude Code sessions that edited files in the change set. Sessions are ranked by how many
- * changed files they touched, then by recency.
+ * Finds recent Claude Code sessions that edited files in the change set, leaving out review sessions.
+ * Sessions are ranked by how many changed files they touched, then by recency.
  */
 export async function findSessions(root: string, changedFiles: string[], maxAgeDays: number): Promise<SessionCandidate[]> {
 	const projects = claudeProjectsDir();

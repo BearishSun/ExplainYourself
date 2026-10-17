@@ -41,10 +41,50 @@ function plain(text: string): string {
 
 /** Where a comment thread goes: a section summary, or one of the section's notes when `note` is set. */
 interface ThreadAnchor {
+	/** Identifies the thread on its document, so later refreshes update it instead of replacing it. */
+	key: string;
 	line: number;
 	category: ReviewCategory;
 	section: ReviewSection;
 	note?: string;
+}
+
+/** Sorted union of line ranges, so overlapping sections do not stack their highlight. */
+function mergeRanges(ranges: LineRange[]): LineRange[] {
+	const result: LineRange[] = [];
+	for (const r of [...ranges].sort((a, b) => a.start - b.start)) {
+		const last = result[result.length - 1];
+		if (last && r.start <= last.end + 1) {
+			last.end = Math.max(last.end, r.end);
+		} else {
+			result.push({ ...r });
+		}
+	}
+	return result;
+}
+
+/** Lines of code kept in view above a revealed section, so it does not open flush with the top. */
+const REVEAL_CONTEXT_LINES = 5;
+
+/** Scrolls an editor so that a section starts REVEAL_CONTEXT_LINES below the top, or as far down as the file allows. */
+function revealSection(editor: vscode.TextEditor, r: LineRange): void {
+	const top = Math.max(0, r.start - 1 - REVEAL_CONTEXT_LINES);
+	const reveal = () => editor.revealRange(new vscode.Range(top, 0, top, 0), vscode.TextEditorRevealType.AtTop);
+	reveal();
+	// A diff editor that is still computing a large diff scrolls to its cursor again when the diff is ready.
+	// Reveal once more if that happens soon after opening, while the cursor is still where we put it.
+	const cursor = editor.selection.active;
+	const watch = vscode.window.onDidChangeTextEditorVisibleRanges((e) => {
+		if (e.textEditor === editor && e.visibleRanges[0]?.start.line !== top && editor.selection.active.isEqual(cursor)) {
+			stop();
+			reveal();
+		}
+	});
+	const timer = setTimeout(() => stop(), 2000);
+	const stop = () => {
+		clearTimeout(timer);
+		watch.dispose();
+	};
 }
 
 function toRange(r: LineRange): vscode.Range {
@@ -55,14 +95,30 @@ function toRange(r: LineRange): vscode.Range {
 export class DiffController implements vscode.Disposable {
 	private readonly disposables: vscode.Disposable[] = [];
 	private readonly comments = vscode.comments.createCommentController('explainYourself', 'ExplainYourself');
-	private readonly threads = new Map<string, { key: string; threads: vscode.CommentThread[] }>();
+	/** Comment threads by document URI, then by anchor key, with the content they show. */
+	private readonly threads = new Map<string, Map<string, { thread: vscode.CommentThread; content: string }>>();
+	/** Generation time of the review the threads show. A newly generated review replaces every thread. */
+	private threadsGeneratedAt: string | undefined;
 	private readonly threadSections = new WeakMap<vscode.CommentThread, string>();
 	private readonly lensEmitter = new vscode.EventEmitter<void>();
+	/**
+	 * Section lines: a faint background, and a thin bar along their left edge that stays visible over the
+	 * diff's own line colors, which remain the main signal.
+	 */
+	private readonly sectionDecoration = vscode.window.createTextEditorDecorationType({
+		backgroundColor: new vscode.ThemeColor('explainYourself.sectionBackground'),
+		borderColor: new vscode.ThemeColor('explainYourself.sectionBorder'),
+		borderStyle: 'solid',
+		borderWidth: '0 0 0 2px',
+		isWholeLine: true
+	});
+	/** Highlighted lines by document URI, for tests. */
+	private readonly highlights = new Map<string, LineRange[]>();
 	/** Working tree file opened as the right side of an old/new comparison. */
 	private compareRight: string | undefined;
 
 	constructor(private readonly state: AppState) {
-		this.disposables.push(this.comments, this.lensEmitter);
+		this.disposables.push(this.comments, this.lensEmitter, this.sectionDecoration);
 		this.disposables.push(vscode.languages.registerCodeLensProvider([{ scheme: 'file' }, { scheme: SCHEME }], {
 			onDidChangeCodeLenses: this.lensEmitter.event,
 			provideCodeLenses: (doc) => this.provideCodeLenses(doc)
@@ -72,14 +128,39 @@ export class DiffController implements vscode.Disposable {
 		this.disposables.push(state.onDidChangeRepo(refresh));
 		this.disposables.push(state.onDidChangeReview(refresh));
 		this.disposables.push(vscode.window.onDidChangeVisibleTextEditors(refresh));
-		this.disposables.push(vscode.window.tabGroups.onDidChangeTabs(() => this.lensEmitter.fire()));
+		// Whether an editor belongs to a review diff shows in its tab, which can appear after the editor.
+		this.disposables.push(
+			vscode.window.tabGroups.onDidChangeTabs(() => {
+				this.lensEmitter.fire();
+				this.refreshHighlights();
+			})
+		);
 		this.disposables.push(vscode.window.onDidChangeActiveTextEditor(() => this.updateContext()));
-		this.disposables.push(vscode.workspace.onDidChangeConfiguration((e) => e.affectsConfiguration('explainYourself') && refresh()));
+		this.disposables.push(
+			vscode.workspace.onDidChangeConfiguration((e) => {
+				if (e.affectsConfiguration('explainYourself.summariesExpanded')) {
+					// Threads take the setting when they are created.
+					this.disposeThreads(() => true);
+				}
+				if (e.affectsConfiguration('explainYourself')) {
+					refresh();
+				}
+			})
+		);
 		this.updateContext();
 	}
 
 	dispose(): void {
 		this.disposables.forEach((d) => d.dispose());
+	}
+
+	private disposeThreads(match: (uri: string) => boolean): void {
+		for (const [uri, shown] of this.threads) {
+			if (match(uri)) {
+				shown.forEach((t) => t.thread.dispose());
+				this.threads.delete(uri);
+			}
+		}
 	}
 
 	/** Opens the diff of a file. Reveals `range` (on `side`) when given. */
@@ -115,26 +196,20 @@ export class DiffController implements vscode.Disposable {
 		if (reveal) {
 			const target = reveal.side === 'new' ? right : left;
 			const editor = vscode.window.visibleTextEditors.find((e) => e.document.uri.toString() === target.toString());
-			editor?.revealRange(toRange(reveal.range), vscode.TextEditorRevealType.AtTop);
+			if (editor) {
+				revealSection(editor, reveal.range);
+			}
 		}
 	}
 
-	/**
-	 * Opens a section. Rewritten sections open as an old/new comparison unless `mode` is 'diff'. Other
-	 * sections open as a diff when their file has changes, and as a plain editor otherwise.
-	 */
-	async openSection(sectionId: string, mode: 'auto' | 'diff' = 'auto'): Promise<void> {
+	/** Opens a section: as a diff when its file has changes, and as a plain editor otherwise. */
+	async openSection(sectionId: string): Promise<void> {
 		const repo = this.state.repo;
 		const found = this.state.findSection(sectionId);
 		if (!repo || !found) {
 			return;
 		}
 		const { section } = found;
-		if (mode === 'auto' && config().get('openRewritesSideBySide', true) && this.state.isRewrite(section)) {
-			await this.compareSection(sectionId);
-			return;
-		}
-
 		const newRange = this.state.newRange(section);
 		const status = this.state.sectionStatus(section);
 		const hasUnstaged = repo.unstaged.has(section.file) || repo.status.some((e) => e.path === section.file && e.kind === 'untracked');
@@ -143,7 +218,7 @@ export class DiffController implements vscode.Disposable {
 			await this.closeCompare();
 			const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(repo.absPath(section.file)));
 			const editor = await vscode.window.showTextDocument(doc, { preview: true, selection: toRange(newRange).with({ end: toRange(newRange).start }) });
-			editor.revealRange(toRange(newRange), vscode.TextEditorRevealType.AtTop);
+			revealSection(editor, newRange);
 			return;
 		}
 
@@ -173,7 +248,7 @@ export class DiffController implements vscode.Disposable {
 		const headPath = this.state.headPath(section);
 		if (!newRange || !oldRange || headPath === null) {
 			vscode.window.setStatusBarMessage('ExplainYourself: this section has no old version to compare with', 3000);
-			await this.openSection(sectionId, 'diff');
+			await this.openSection(sectionId);
 			return;
 		}
 
@@ -192,10 +267,8 @@ export class DiffController implements vscode.Disposable {
 		});
 		this.compareRight = rightUri.toString();
 
-		// Start one line above the section so the summary shown above it stays in view.
-		const revealFrom = (r: LineRange) => new vscode.Range(Math.max(0, r.start - 2), 0, r.end - 1, 0);
-		leftEditor.revealRange(revealFrom(oldRange), vscode.TextEditorRevealType.AtTop);
-		rightEditor.revealRange(revealFrom(newRange), vscode.TextEditorRevealType.AtTop);
+		revealSection(leftEditor, oldRange);
+		revealSection(rightEditor, newRange);
 		this.refreshEditors();
 	}
 
@@ -365,6 +438,42 @@ export class DiffController implements vscode.Disposable {
 		return lenses;
 	}
 
+	/**
+	 * Highlights the lines of each section in review diffs and comparisons, together with the nearby changes
+	 * that staging the section also stages, so the reader sees what a stage takes.
+	 */
+	private refreshHighlights(): void {
+		const repo = this.state.repo;
+		const show = config().get('highlightSections', true);
+		this.highlights.clear();
+		for (const editor of vscode.window.visibleTextEditors) {
+			const uri = editor.document.uri;
+			const ctx = docContext(repo, uri);
+			if (!repo || !show || !ctx || this.isPlain(ctx) || (ctx.ref === 'WORKTREE' && !this.isInOurDiff(uri))) {
+				editor.setDecorations(this.sectionDecoration, []);
+				continue;
+			}
+			const ranges = this.sectionRanges(ctx).flatMap(({ section, ranges }) => {
+				const nearby = this.state.stageUnits(section).slice(1);
+				if (ctx.ref === 'WORKTREE') {
+					return [...ranges, ...nearby.flatMap((u) => (u.newRange ? [u.newRange] : []))];
+				}
+				if (ctx.ref === 'INDEX' && ctx.view !== 'compare') {
+					return [...ranges, ...nearby.flatMap((u) => indexRanges(repo, u, u.newRange))];
+				}
+				return ranges;
+			});
+			const merged = mergeRanges(ranges);
+			this.highlights.set(uri.toString(), merged);
+			editor.setDecorations(this.sectionDecoration, merged.map(toRange));
+		}
+	}
+
+	/** Highlighted section lines of a document. For tests. */
+	highlightsOf(uri: vscode.Uri): LineRange[] {
+		return this.highlights.get(uri.toString()) ?? [];
+	}
+
 	/** Lines of the review sections that apply to a document, in that document's coordinates. */
 	private sectionRanges(ctx: DocContext): { category: ReviewCategory; section: ReviewSection; ranges: LineRange[] }[] {
 		const repo = this.state.repo;
@@ -392,6 +501,7 @@ export class DiffController implements vscode.Disposable {
 	private refreshEditors(): void {
 		this.lensEmitter.fire();
 		this.updateContext();
+		this.refreshHighlights();
 
 		this.refreshThreads();
 	}
@@ -423,92 +533,106 @@ export class DiffController implements vscode.Disposable {
 				start = newInIndex.length === 0 ? section.oldRange?.start : undefined;
 			}
 			if (start !== undefined) {
-				result.push({ line: Math.max(0, start - 2), category, section });
+				result.push({ key: section.id, line: Math.max(0, start - 2), category, section });
 			}
 
 			// Notes refer to working tree lines; the staged view shows them where those lines are in the index.
-			for (const note of this.state.notes(section)) {
+			for (const [i, note] of this.state.notes(section).entries()) {
 				const line = ctx.ref === 'WORKTREE' ? note.line : ctx.ref === 'INDEX' && ctx.view === 'staged' ? mapRange(unstaged, { start: note.line, end: note.line }, 'new')[0]?.start : undefined;
 				if (line !== undefined) {
-					result.push({ line: Math.max(0, line - 2), category, section, note: note.text });
+					result.push({ key: `${section.id}#${i}`, line: Math.max(0, line - 2), category, section, note: note.text });
 				}
 			}
 		}
 		return result;
 	}
 
+	/**
+	 * Shows the comment threads of each visible review document. Existing threads move and change in place:
+	 * replacing a thread removes and re-adds its view zone, which makes the editor jump while the user types.
+	 */
 	private refreshThreads(): void {
+		if (this.state.review?.generatedAt !== this.threadsGeneratedAt) {
+			this.disposeThreads(() => true);
+			this.threadsGeneratedAt = this.state.review?.generatedAt;
+		}
 		const open = new Set<string>();
 		const collapse = config().get('summariesExpanded', true) ? vscode.CommentThreadCollapsibleState.Expanded : vscode.CommentThreadCollapsibleState.Collapsed;
 		for (const editor of vscode.window.visibleTextEditors) {
 			const uri = editor.document.uri;
 			const ctx = docContext(this.state.repo, uri);
-			if (!ctx) {
+			const key = uri.toString();
+			if (!ctx || open.has(key)) {
 				continue;
 			}
-			const key = uri.toString();
 			open.add(key);
 
+			const shown = this.threads.get(key) ?? new Map<string, { thread: vscode.CommentThread; content: string }>();
+			this.threads.set(key, shown);
 			const anchors = this.threadAnchors(ctx);
-			const signature = JSON.stringify(
-				anchors.map((a) => [a.line, a.section.id, a.note ?? a.section.summary, a.note === undefined ? a.section.concerns : undefined, this.state.review?.generatedAt, this.state.review?.updatedAt, this.state.relatedSections(a.section).map((r) => r.id)])
-			);
-			const existing = this.threads.get(key);
-			if (existing?.key === signature) {
-				continue;
-			}
-			existing?.threads.forEach((t) => t.dispose());
-
-			const threads = anchors.map((a) => {
-				if (a.note !== undefined) {
-					// Notes are plain comments: no label, links or section buttons.
-					const thread = this.comments.createCommentThread(uri, new vscode.Range(a.line, 0, a.line, 0), [
-						{ body: new vscode.MarkdownString(a.note), mode: vscode.CommentMode.Preview, author: { name: 'Note' } }
-					]);
+			for (const a of anchors) {
+				const range = new vscode.Range(a.line, 0, a.line, 0);
+				const view = this.threadView(a);
+				const content = JSON.stringify([view.comment.author.name, (view.comment.body as vscode.MarkdownString).value, view.label, view.contextValue]);
+				const existing = shown.get(a.key);
+				if (!existing) {
+					const thread = this.comments.createCommentThread(uri, range, [view.comment]);
 					thread.canReply = false;
-					thread.contextValue = 'explainYourselfNote';
+					thread.label = view.label;
+					thread.contextValue = view.contextValue;
 					thread.collapsibleState = collapse;
-					return thread;
+					this.threadSections.set(thread, a.section.id);
+					shown.set(a.key, { thread, content });
+					continue;
 				}
-				const related = this.state.relatedSections(a.section);
-				const links = related.map((r) => {
-					const range = this.state.newRange(r);
-					const label = `${path.posix.basename(r.file)}${range ? `:${range.start}` : ''}`;
-					return `[${label}](command:explainYourself.openSection?${encodeURIComponent(JSON.stringify([r.id]))} "${r.title.replace(/"/g, "'")}")`;
-				});
-				const concerns = (a.section.concerns ?? []).map((c) => `- ${c.tag ? `**${c.tag}:** ` : ''}${c.text}`).join('\n');
-				const body = new vscode.MarkdownString(
-					(a.section.summary || '_No summary._') + (concerns ? `\n\n$(warning) **Check**\n\n${concerns}` : '') + (links.length ? `\n\n$(link) Related: ${links.join(' · ')}` : ''),
-					true
-				);
-				body.isTrusted = { enabledCommands: ['explainYourself.openSection'] };
-				const comment: vscode.Comment = {
-					body,
-					mode: vscode.CommentMode.Preview,
-					author: { name: plain(a.section.title) }
-				};
-				const thread = this.comments.createCommentThread(uri, new vscode.Range(a.line, 0, a.line, 0), [comment]);
-				thread.canReply = false;
-				thread.label = plain(a.category.title);
-				thread.contextValue = related.length ? 'explainYourselfGrouped' : 'explainYourselfSection';
-				thread.collapsibleState = collapse;
-				this.threadSections.set(thread, a.section.id);
-				return thread;
-			});
-			this.threads.set(key, { key: signature, threads });
-		}
-
-		for (const [key, entry] of this.threads) {
-			if (!open.has(key)) {
-				entry.threads.forEach((t) => t.dispose());
-				this.threads.delete(key);
+				if (!existing.thread.range?.isEqual(range)) {
+					existing.thread.range = range;
+				}
+				if (existing.content !== content) {
+					existing.thread.comments = [view.comment];
+					existing.thread.label = view.label;
+					existing.thread.contextValue = view.contextValue;
+					existing.content = content;
+				}
+			}
+			const keys = new Set(anchors.map((a) => a.key));
+			for (const [k, t] of shown) {
+				if (!keys.has(k)) {
+					t.thread.dispose();
+					shown.delete(k);
+				}
 			}
 		}
+		this.disposeThreads((uri) => !open.has(uri));
 	}
 
-	/** Comment threads shown on a document: 0-based line, and whether the thread is a note. For tests. */
-	threadsOf(uri: vscode.Uri): { line: number; note: boolean }[] {
-		return (this.threads.get(uri.toString())?.threads ?? []).map((t) => ({ line: t.range?.start.line ?? -1, note: t.contextValue === 'explainYourselfNote' }));
+	/** Comment, label and context value of a thread. Notes are plain comments: no label, links or section buttons. */
+	private threadView(a: ThreadAnchor): { comment: vscode.Comment; label?: string; contextValue: string } {
+		if (a.note !== undefined) {
+			return { comment: { body: new vscode.MarkdownString(a.note), mode: vscode.CommentMode.Preview, author: { name: 'Note' } }, contextValue: 'explainYourselfNote' };
+		}
+		const related = this.state.relatedSections(a.section);
+		const links = related.map((r) => {
+			const range = this.state.newRange(r);
+			const label = `${path.posix.basename(r.file)}${range ? `:${range.start}` : ''}`;
+			return `[${label}](command:explainYourself.openSection?${encodeURIComponent(JSON.stringify([r.id]))} "${r.title.replace(/"/g, "'")}")`;
+		});
+		const concerns = (a.section.concerns ?? []).map((c) => `- ${c.tag ? `**${c.tag}:** ` : ''}${c.text}`).join('\n');
+		const body = new vscode.MarkdownString(
+			(a.section.summary || '_No summary._') + (concerns ? `\n\n$(warning) **Check**\n\n${concerns}` : '') + (links.length ? `\n\n$(link) Related: ${links.join(' · ')}` : ''),
+			true
+		);
+		body.isTrusted = { enabledCommands: ['explainYourself.openSection'] };
+		return {
+			comment: { body, mode: vscode.CommentMode.Preview, author: { name: plain(a.section.title) } },
+			label: plain(a.category.title),
+			contextValue: related.length ? 'explainYourselfGrouped' : 'explainYourselfSection'
+		};
+	}
+
+	/** Comment threads shown on a document: 0-based line, whether the thread is a note, and the thread. For tests. */
+	threadsOf(uri: vscode.Uri): { line: number; note: boolean; thread: vscode.CommentThread }[] {
+		return [...(this.threads.get(uri.toString())?.values() ?? [])].map(({ thread }) => ({ line: thread.range?.start.line ?? -1, note: thread.contextValue === 'explainYourselfNote', thread }));
 	}
 
 	sectionOfThread(thread: vscode.CommentThread): string | undefined {
