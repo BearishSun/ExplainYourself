@@ -5,7 +5,7 @@ import { changedLines } from '../core/coverage';
 import { ReviewSection } from '../core/review';
 import { ClaudeAccount } from './claude';
 import { AppState } from './state';
-import { log } from './util';
+import { config, log } from './util';
 
 export type ViewMessage =
 	| { type: 'command'; command: string; args?: unknown[] }
@@ -168,7 +168,8 @@ export class ReviewView implements vscode.WebviewViewProvider {
 						}
 					: null,
 				account: this.account.status,
-				generation: g ? { running: !g.done, log: g.log.slice(-40), error: g.error } : null,
+				model: config().get<string>('model', 'claude-sonnet-5-5'),
+				generation: g ? { running: !g.done, followUp: !!g.followUp, log: g.log.slice(-40), error: g.error } : null,
 				review: review
 					? {
 							generatedAt: review.generatedAt,

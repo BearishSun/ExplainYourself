@@ -3,6 +3,7 @@ import * as path from 'path';
 import { FileDiff, LineRange, parseDiff } from './diff';
 import { git } from './exec';
 import { reviewDir } from './review';
+import { addedLineKey } from './sessions';
 import { prefixDiff, Workspace, WorkspacePart } from './workspace';
 
 /** Summary of one changed file in the full HEAD -> working tree change set. */
@@ -34,7 +35,8 @@ function pad(n: number | string, width: number): string {
 	return s.length >= width ? s : ' '.repeat(width - s.length) + s;
 }
 
-function decode(latin1: string): string {
+/** Text of a line of a git diff, which is read as latin1, as UTF-8. */
+export function decode(latin1: string): string {
 	return Buffer.from(latin1, 'latin1').toString('utf8');
 }
 
@@ -87,6 +89,26 @@ async function partDiff(ws: Workspace, part: WorkspacePart, context: number): Pr
 	return parseDiff(out.toString('latin1'))
 		.map((d) => prefixDiff(d, prefix))
 		.filter((d) => ws.status.some((e) => e.path === d.path) || !ws.selectedSubmodules.includes(d.path));
+}
+
+/** Lines the change set adds, per file, keyed for matching against what Claude sessions wrote. */
+export function addedLines(changes: ChangeSet): Map<string, Set<string>> {
+	const result = new Map<string, Set<string>>();
+	for (const [file, diff] of changes.diffs) {
+		// Untracked files are read as UTF-8 already; git diffs as latin1.
+		const text = changes.files.find((f) => f.path === file)?.status === 'untracked' ? (t: string) => t : decode;
+		const keys = new Set<string>();
+		for (const l of diff.hunks.flatMap((h) => h.lines)) {
+			const key = l.type === '+' ? addedLineKey(text(l.text)) : null;
+			if (key) {
+				keys.add(key);
+			}
+		}
+		if (keys.size > 0) {
+			result.set(file, keys);
+		}
+	}
+	return result;
 }
 
 /** Untracked files of the workspace, with root-relative paths. */

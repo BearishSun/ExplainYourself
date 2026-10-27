@@ -20,7 +20,7 @@ for (let c = 0, i = 0; i < total; c++) {
 			lines: `${10 * s + 1}-${10 * s + 8}`,
 			status: (i * 7) % total < staged ? 'staged' : 'pending',
 			comparable: true,
-			related: s === 0 ? [{ id: `c${c}s1`, file: `src/module${c}/file1.h`, lines: '4-6' }] : [],
+			related: s === 0 ? Array.from({ length: 7 }, (_, k) => ({ id: `c${c}s${k + 1}`, file: `src/module${c}/subsystem/file${k + 1}.h`, lines: `${4 + 10 * k}-${9 + 10 * k}` })) : s === 1 ? [{ id: `c${c}s1`, file: `src/module${c}/file1.h`, lines: '4-6' }] : [],
 			added: (i * 37) % 90,
 			removed: (i * 11) % 20,
 			changed: Math.max((i * 37) % 90, (i * 11) % 20),
@@ -46,7 +46,8 @@ const state = {
 		]
 	},
 	account: { installed: true, loggedIn: true, email: 'user@example.com' },
-	generation: null,
+	model: 'claude-sonnet-5-5',
+	generation: process.env.PREVIEW_FOLLOW_UP ? { running: true, followUp: true, error: null, log: [{ kind: 'status', message: 'Validating review…' }, { kind: 'status', message: '4 change(s) in 2 file(s) have no section; asking the review session to cover them…' }, { kind: 'tool', message: 'Read coverage.md' }] } : null,
 	uncovered: [],
 	review: noReview ? null : {
 		generatedAt: '2026-10-07T14:00:00Z',

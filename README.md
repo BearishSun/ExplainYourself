@@ -8,8 +8,8 @@ An AI-assisted code review helper tool for VS Code. Before you commit, Claude ex
 - **Summaries next to the code.** Each relevant region of code is a section with a summary, shown in the panel and above the code in VS Code's own diff editor. Long methods get a short note above each part.
 - **Review findings.** Each category and section lists what a careful reviewer would push back on: hacks, duplication, layering problems, outdated documentation, performance traps, and breaks of your `CLAUDE.md` / `AGENTS.md` conventions. The rules are editable.
 - **Fast staging with undo.** Stage a section, a category, a hunk or selected lines with one click or `Ctrl+Alt+S`. `Ctrl+Alt+Z` undoes any of them.
-- **Nothing slips through.** A progress grid shows what is reviewed and staged. Changes no section covers are listed separately.
-- **Context from the session that wrote the code.** When a Claude Code session made the changes, the review agent continues from a fork of it, so it knows why the code changed.
+- **Nothing slips through.** A progress grid shows what is reviewed and staged. The agent is asked to cover any changed lines its review missed, and changes still without a section are listed separately.
+- **Context from the session that wrote the code.** Pick the Claude Code session that made the changes, ranked by how much of the uncommitted code it wrote, and the review agent continues from a fork of it, so it knows why the code changed.
 
 ## Requirements
 
@@ -30,7 +30,7 @@ An AI-assisted code review helper tool for VS Code. Before you commit, Claude ex
 | `Ctrl+Alt+Z` / `Ctrl+Alt+Y` | Undo / redo the last stage or unstage. |
 | `Ctrl+Alt+O` | Jump to the related section, such as a method's declaration and its definition. |
 
-**Rules** in the panel opens the review rules for editing. Settings are under `explainYourself.*`; the most useful one is `explainYourself.model` (default `claude-sonnet-5-5`).
+**Rules** in the panel opens the review rules for editing. Settings are under `explainYourself.*`; the most useful one is `explainYourself.model` (default `claude-sonnet-5-5`), which you can also pick under **▾** next to **Generate review**.
 
 The [guide](docs/GUIDE.md) describes every feature in detail: review rules, submodules, how sections follow later edits, where the context comes from, all settings, development and publishing.
 

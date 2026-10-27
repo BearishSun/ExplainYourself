@@ -99,7 +99,7 @@ ${guidance.rules}${instructions}
 - Look for findings actively while reading the code, but omit concerns where you find nothing. Do not invent issues.`;
 }
 
-const INTRO = `${REVIEW_PROMPT_START} A human reviewer will read your categories and summaries next to the diff and stage each change once they understand and accept it.
+export const INTRO = `${REVIEW_PROMPT_START} A human reviewer will read your categories and summaries next to the diff and stage each change once they understand and accept it.
 
 Assume the reviewer is a competent engineer who is completely unfamiliar with this code. Explain the role of each component and domain term on first mention. Prefer concrete statements ("Load() now retries three times before failing") over vague ones ("improves robustness").
 
@@ -167,6 +167,36 @@ ${reviewChecks(guidance)}
 - Do not modify any source files.${mode.kind === 'skill' ? ' The only file you write is the review JSON named below.' : ''}
 
 ${output}
+`;
+}
+
+/**
+ * Follow-up prompt for the session that just wrote a review, when some changed lines have no section.
+ * `coverageFile` lists them (see renderCoverage()). The agent returns only the sections it extends or adds.
+ */
+export function buildCoveragePrompt(coverageFile: string): string {
+	return `Your review leaves some changed lines without a section, but every changed line must belong to a section. The review is otherwise complete; cover only these lines.
+
+## Inputs
+- The uncovered lines: ${coverageFile}
+  The categories of the review by id, then per file the sections of the file by id and the changed lines no section covers.
+
+## What to produce
+For each block of uncovered lines:
+1. When the lines are part of the code a neighbouring section explains, such as the rest of its function, extend that section: list it under its category with its id and the new newStart/newEnd (or oldStart/oldEnd for removed lines). Give summary too when the old one no longer describes the larger section. Fields you leave out keep their value. Never add a second section for the rest of a function that a section already covers in part; extend that section.
+2. Otherwise add a new section without an id, under the category it belongs to. Use only the category ids listed in the file. Give "before" with a section id to place it before that section; without it, it goes after the sections of the same file.
+3. Add a new category, without an id and with title, oldBehavior and newBehavior, only when the code fits no existing category; give "before" with the id of the category it should precede.
+Return only the categories and sections you extend or add. Leave out everything else; it stays as it is.
+
+Section rules:
+${SECTION_RULES}
+
+## Rules
+- Read the uncovered lines file first. Read the source files only where you need more context.
+- Do not modify any source files.
+
+## Output
+Return the changes as structured output matching the provided JSON schema.
 `;
 }
 

@@ -21,7 +21,7 @@ const claude = process.env.CLAUDE_PATH || 'claude';
 	const { review } = await generateReview(repo, {
 		claudePath: claude,
 		model,
-		source: { kind: 'session', session: { sessionId, cwd: dir, transcript: '', title: 'seed', lastActive: new Date(), editedFiles: {} } },
+		source: { kind: 'session', session: { sessionId, cwd: dir, transcript: '', title: 'seed', lastActive: new Date(), editedFiles: {}, writtenLines: 0, lastEdit: null } },
 		sessionMaxAgeDays: 1,
 		onProgress: (p) => console.log(`[${p.kind}] ${p.message.slice(0, 120).replace(/\n/g, ' ')}`)
 	});

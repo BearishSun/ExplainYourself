@@ -2,7 +2,7 @@
   "name": "explain-yourself",
   "displayName": "Explain Yourself: AI Code Review Assistant",
   "description": "AI-assisted code review helper tool: Claude explains your uncommitted changes category by category and flags code smells, and you stage hunks and lines as you accept them.",
-  "version": "0.1.14",
+  "version": "0.1.20",
   "publisher": "MarkoPintera",
   "license": "MIT",
   "repository": {
@@ -221,6 +221,12 @@
         "icon": "$(list-tree)"
       },
       {
+        "command": "explainYourself.explainSection",
+        "title": "Explain in More Detail",
+        "category": "ExplainYourself",
+        "icon": "$(question)"
+      },
+      {
         "command": "explainYourself.toggleInline",
         "title": "Toggle Inline / Side-by-Side Diff",
         "category": "ExplainYourself",
@@ -301,6 +307,11 @@
         "command": "explainYourself.setToggle",
         "title": "Set Highlight Toggle",
         "category": "ExplainYourself"
+      },
+      {
+        "command": "explainYourself.setModel",
+        "title": "Set Review Model",
+        "category": "ExplainYourself"
       }
     ],
     "menus": {
@@ -350,11 +361,19 @@
           "when": "false"
         },
         {
+          "command": "explainYourself.setModel",
+          "when": "false"
+        },
+        {
           "command": "explainYourself.stageSection",
           "when": "false"
         },
         {
           "command": "explainYourself.revealSection",
+          "when": "false"
+        },
+        {
+          "command": "explainYourself.explainSection",
           "when": "false"
         },
         {
@@ -508,6 +527,11 @@
           "command": "explainYourself.revealSection",
           "when": "commentController == explainYourself && commentThread != explainYourselfNote",
           "group": "inline@4"
+        },
+        {
+          "command": "explainYourself.explainSection",
+          "when": "commentController == explainYourself && commentThread != explainYourselfNote",
+          "group": "inline@5"
         }
       ]
     },
@@ -581,6 +605,11 @@
           "type": "number",
           "default": 14,
           "description": "How many days of Claude Code session transcripts to search for the session that wrote the changes."
+        },
+        "explainYourself.askForSession": {
+          "type": "boolean",
+          "default": true,
+          "description": "Before generating a review, choose which Claude session to fork, or a new agent. The sessions that wrote the most of the uncommitted lines come first. When off, that session is forked without asking, or a new agent starts when no session wrote any of them."
         },
         "explainYourself.diffAlgorithm": {
           "type": "string",

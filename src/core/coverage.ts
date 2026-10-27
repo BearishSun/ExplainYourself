@@ -118,6 +118,8 @@ export interface UncoveredChange {
 
 /** Changes at most this many lines away from a section belong to it: usually lines its range just misses. */
 const NEAR_LINES = 2;
+/** Most lines with code that a change next to a section can have and still join it; larger ones stay uncovered. */
+const NEAR_MAX_LINES = 5;
 
 export interface Coverage {
 	/** Changes that no section covers or takes in. */
@@ -127,6 +129,26 @@ export interface Coverage {
 	 * and changes next to the section. Staging the section stages them too.
 	 */
 	attached: Map<string, UncoveredChange[]>;
+}
+
+/** An untracked file as one hunk that adds every line, so its lines can be checked one by one. */
+function addedHunk(text: string): Hunk {
+	const lines = text.split('\n');
+	if (lines[lines.length - 1] === '') {
+		lines.pop();
+	}
+	return {
+		oldStart: 0,
+		oldCount: 0,
+		newStart: 1,
+		newCount: lines.length,
+		lines: lines.map((l, i) => ({ type: '+', text: `${l}\n`, oldLine: 0, newLine: i + 1 }))
+	};
+}
+
+/** Changed lines of a change that hold more than whitespace. */
+function codeLines(units: ChangeUnit[]): number {
+	return units.reduce((n, u) => n + Math.max(u.added && u.added.text.trim() ? 1 : 0, u.removed.filter((l) => l.text.trim()).length), 0);
 }
 
 /** A new line of a zero-context hunk with the old lines `selectLines` pairs with it, or a pure removal. */
@@ -183,10 +205,16 @@ function gap(change: UncoveredChange, r: LineRange): number {
 
 /**
  * Finds the changes (HEAD -> working tree) that no review section covers, line by line, so the part of a
- * hunk that a section range cuts off counts too. Whitespace-only changes, and changes within NEAR_LINES of
- * a section, go to the nearest section of their file instead.
+ * hunk that a section range cuts off counts too. Whitespace-only changes, and small changes within
+ * NEAR_LINES of a section, go to the nearest section of their file instead. `untrackedText` holds the
+ * contents of untracked text files, which are checked line by line like the rest.
  */
-export function findCoverage(review: Review, fullDiffs: ReadonlyMap<string, FileDiff>, newRangeOf: (s: ReviewSection) => LineRange | undefined): Coverage {
+export function findCoverage(
+	review: Review,
+	fullDiffs: ReadonlyMap<string, FileDiff>,
+	newRangeOf: (s: ReviewSection) => LineRange | undefined,
+	untrackedText: ReadonlyMap<string, string> = new Map()
+): Coverage {
 	const byFile = new Map<string, ReviewSection[]>();
 	for (const c of review.categories) {
 		for (const s of c.sections) {
@@ -197,7 +225,9 @@ export function findCoverage(review: Review, fullDiffs: ReadonlyMap<string, File
 	const result: Coverage = { uncovered: [], attached: new Map() };
 	for (const [file, diff] of fullDiffs) {
 		const sections = byFile.get(file) ?? [];
-		if (diff.hunks.length === 0) {
+		const text = diff.hunks.length === 0 ? untrackedText.get(file) : undefined;
+		const hunks = text !== undefined ? [addedHunk(text)] : diff.hunks;
+		if (hunks.length === 0) {
 			// Untracked or binary: covered when any section mentions the file.
 			if (sections.length === 0) {
 				result.uncovered.push({ file, line: 1, added: 0, removed: 0, newRange: { start: 1, end: Number.MAX_SAFE_INTEGER } });
@@ -205,7 +235,7 @@ export function findCoverage(review: Review, fullDiffs: ReadonlyMap<string, File
 			continue;
 		}
 
-		for (const h of diff.hunks) {
+		for (const h of hunks) {
 			// Runs of uncovered units become one change each.
 			const runs: ChangeUnit[][] = [];
 			let run: ChangeUnit[] = [];
@@ -230,7 +260,7 @@ export function findCoverage(review: Review, fullDiffs: ReadonlyMap<string, File
 						nearest = { section: s, gap: g };
 					}
 				}
-				if (nearest && (nearest.gap <= NEAR_LINES || whitespaceOnly(units))) {
+				if (nearest && ((nearest.gap <= NEAR_LINES && codeLines(units) <= NEAR_MAX_LINES) || whitespaceOnly(units))) {
 					result.attached.set(nearest.section.id, [...(result.attached.get(nearest.section.id) ?? []), change]);
 				} else {
 					result.uncovered.push(change);

@@ -615,7 +615,7 @@ export class DiffController implements vscode.Disposable {
 		const links = related.map((r) => {
 			const range = this.state.newRange(r);
 			const label = `${path.posix.basename(r.file)}${range ? `:${range.start}` : ''}`;
-			return `[${label}](command:explainYourself.openSection?${encodeURIComponent(JSON.stringify([r.id]))} "${r.title.replace(/"/g, "'")}")`;
+			return `[${label}](command:explainYourself.openSection?${encodeURIComponent(JSON.stringify([r.id]))} "${`${r.file}${range ? `:${range.start}` : ''} · ${r.title}`.replace(/"/g, "'")}")`;
 		});
 		const concerns = (a.section.concerns ?? []).map((c) => `- ${c.tag ? `**${c.tag}:** ` : ''}${c.text}`).join('\n');
 		const body = new vscode.MarkdownString(

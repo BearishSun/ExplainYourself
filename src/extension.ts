@@ -1,12 +1,14 @@
+import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { indexRanges } from './core/coverage';
 import { DiffLine, FileDiff } from './core/diff';
 import { setGitPath } from './core/exec';
+import { explainSection } from './core/explain';
 import { activeRulesFile, DEFAULT_REVIEW_RULES, userRulesFile } from './core/guidance';
 import { migrateUserData } from './core/legacy';
 import { reviewDir, ReviewSection } from './core/review';
-import { findSessions } from './core/sessions';
+import { SessionCandidate } from './core/sessions';
 import { selectSections } from './core/stager';
 import { StatusEntry } from './core/status';
 import { ChangesTree } from './ui/changesTree';
@@ -172,7 +174,33 @@ export async function activate(context: vscode.ExtensionContext): Promise<Explai
 		vscode.window.setStatusBarMessage(label ? `ExplainYourself: redid "${label}"` : 'ExplainYourself: nothing to redo', 2500);
 	});
 
-	const startGeneration = async (source: Parameters<AppState['generate']>[0]) => {
+	/** Asks which session to fork for the review: the sessions that edited the changes, best match first, or a new agent. */
+	const chooseSession = async (sessions: SessionCandidate[]): Promise<SessionCandidate | 'new' | undefined> => {
+		type Item = vscode.QuickPickItem & { choice?: SessionCandidate | 'new' };
+		const ago = (d: Date) => {
+			const minutes = Math.round((Date.now() - d.getTime()) / 60000);
+			return minutes < 60 ? `${minutes} min ago` : minutes < 48 * 60 ? `${Math.round(minutes / 60)} h ago` : `${Math.round(minutes / 1440)} days ago`;
+		};
+		const item = (s: SessionCandidate): Item => ({
+			label: s.title || s.sessionId,
+			description: `${s.writtenLines > 0 ? `wrote ${s.writtenLines} changed line(s)` : 'none of its edits are uncommitted'} · last edit ${ago(s.lastEdit ?? s.lastActive)}`,
+			detail: `${Object.keys(s.editedFiles).length} changed file(s): ${Object.keys(s.editedFiles).map((f) => f.split('/').pop()).slice(0, 6).join(', ')}`,
+			choice: s
+		});
+		const writers = sessions.filter((s) => s.writtenLines > 0);
+		const others = sessions.filter((s) => s.writtenLines === 0);
+		const fresh: Item = { label: '$(add) New agent', description: 'without a session', detail: 'Reads the code, and the transcripts of the sessions below, for intent.', choice: 'new' };
+		const items: Item[] = [
+			...writers.map(item),
+			...(writers.length > 0 ? [{ label: '', kind: vscode.QuickPickItemKind.Separator }] : []),
+			fresh,
+			...(others.length > 0 ? [{ label: 'Edited these files earlier', kind: vscode.QuickPickItemKind.Separator }, ...others.slice(0, 10).map(item)] : [])
+		];
+		const pick = await vscode.window.showQuickPick(items, { title: 'Which Claude session should write the review?', placeHolder: 'The session is forked; the original is not changed.', matchOnDescription: true, matchOnDetail: true });
+		return pick?.choice;
+	};
+
+	const startGeneration = async (source: Parameters<AppState['generate']>[0], ask = config().get<boolean>('askForSession', true)) => {
 		if (!requireRepo()) {
 			return;
 		}
@@ -192,7 +220,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Explai
 			}
 		}
 		vscode.commands.executeCommand('explainYourself.review.focus');
-		if (await state.generate(source, account.claudePath)) {
+		if (await state.generate(source, account.claudePath, ask ? chooseSession : undefined)) {
 			vscode.window.showInformationMessage('ExplainYourself: the review is up to date; no reviewed file changed.');
 		}
 		if (state.generation?.error) {
@@ -202,33 +230,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<Explai
 	register('explainYourself.generate', () => startGeneration({ kind: 'auto' }));
 	register('explainYourself.updateReview', () => startGeneration({ kind: 'update' }));
 	register('explainYourself.generateFresh', () => startGeneration({ kind: 'fresh' }));
-	register('explainYourself.generateFromSession', async () => {
-		const repo = requireRepo();
-		if (!repo) {
-			return;
-		}
-		const files = [...new Set([...repo.status.map((e) => e.path), ...repo.staged.keys()])];
-		const sessions = await vscode.window.withProgress(
-			{ location: vscode.ProgressLocation.Notification, title: 'ExplainYourself: searching Claude sessions…' },
-			() => findSessions(repo.root, files, config().get<number>('sessionSearchDays', 14))
-		);
-		if (sessions.length === 0) {
-			vscode.window.showInformationMessage('ExplainYourself: no recent Claude session edited these files. Use "New agent" instead.');
-			return;
-		}
-		const pick = await vscode.window.showQuickPick(
-			sessions.map((s) => ({
-				label: s.title || s.sessionId,
-				description: `${s.lastActive.toLocaleString()} · ${Object.keys(s.editedFiles).length} changed file(s)`,
-				detail: `${s.cwd ?? '?'} · ${Object.keys(s.editedFiles).slice(0, 6).join(', ')}`,
-				session: s
-			})),
-			{ title: 'Fork which Claude session to write the review?', matchOnDetail: true }
-		);
-		if (pick) {
-			await startGeneration({ kind: 'session', session: pick.session });
-		}
-	});
+	// Asks for the session even when the setting says not to.
+	register('explainYourself.generateFromSession', () => startGeneration({ kind: 'auto' }, true));
 	register('explainYourself.cancelGeneration', () => state.cancelGeneration());
 	register('explainYourself.setSubmodules', (paths: string[]) => state.setSubmodules(paths));
 	register('explainYourself.selectSubmodules', async () => {
@@ -308,6 +311,54 @@ export async function activate(context: vscode.ExtensionContext): Promise<Explai
 			reviewView.reveal(id);
 		}
 	});
+	// One explanation at a time: each continues the review session.
+	let explaining: string | undefined;
+	register('explainYourself.explainSection', async (arg: string | vscode.CommentThread) => {
+		const id = typeof arg === 'string' ? arg : diffs.sectionOfThread(arg);
+		const found = id ? state.findSection(id) : undefined;
+		const review = state.review;
+		if (!found || !review) {
+			return;
+		}
+		if (explaining || (state.generation && !state.generation.done)) {
+			vscode.window.showInformationMessage(`ExplainYourself: wait until ${explaining ? `"${explaining}" is explained` : 'the review is generated'}.`);
+			return;
+		}
+		await account.refresh();
+		if (!account.status.installed || !account.claudePath) {
+			await account.showMenu();
+			return;
+		}
+		const claudePath = account.claudePath;
+		const { section } = found;
+		explaining = section.title;
+		try {
+			const request = await state.explainRequest(section);
+			const source = review.source;
+			const explanation = await vscode.window.withProgress(
+				{ location: vscode.ProgressLocation.Notification, title: `ExplainYourself: explaining "${section.title}" in more detail…`, cancellable: true },
+				(_progress, token) =>
+					explainSection(request, {
+						claudePath,
+						model: config().get<string>('model', 'claude-sonnet-5-5') || undefined,
+						repoRoot: state.repo!.root,
+						session: source.reviewSessionId && source.reviewCwd && fs.existsSync(source.reviewCwd) ? { id: source.reviewSessionId, cwd: source.reviewCwd } : undefined,
+						onStart: (run) => token.onCancellationRequested(() => run.cancel())
+					})
+			);
+			if (state.review !== review) {
+				throw new Error('The review was regenerated meanwhile.');
+			}
+			await state.applyExplanation(section.id, explanation);
+		} catch (e) {
+			const message = e instanceof Error ? e.message : String(e);
+			if (message !== 'Cancelled.') {
+				vscode.window.showErrorMessage(`ExplainYourself: could not explain "${section.title}": ${message.split('\n')[0]}`);
+			}
+		} finally {
+			explaining = undefined;
+		}
+	});
 	register('explainYourself.stageUncovered', async () => {
 		const sections = state.uncoveredSections();
 		await stageSections(sections, `Stage ${sections.length === 1 ? 'the change' : `${sections.length} changes`} not covered by the review`);
@@ -319,34 +370,61 @@ export async function activate(context: vscode.ExtensionContext): Promise<Explai
 		}
 	});
 
+	// Every on/off setting, in one checklist; the title button opens the rest (model, paths, diff algorithm).
 	register('explainYourself.settings', async () => {
-		type Item = vscode.QuickPickItem & { key: string };
+		type Item = vscode.QuickPickItem & { key?: string; on?: boolean };
+		const setting = (key: string, label: string, detail: string, fallback: boolean): Item => ({ key, label, detail, on: config().get<boolean>(key, fallback) });
 		const items: Item[] = [
-			{ key: 'changedLines', label: 'Changed lines', description: 'Diff background on changed lines', picked: diffColorEnabled('changedLines') },
-			{ key: 'changedWords', label: 'Changed words', description: 'Diff background on changed words', picked: diffColorEnabled('changedWords') },
-			{ key: 'summaries', label: 'Summaries in diff', description: 'Section summaries above each section', picked: config().get('showSummaries', true) },
-			{ key: 'plainCompare', label: 'Plain Old ↔ New', description: 'No summaries or Stage buttons in the old/new comparison', picked: config().get('plainCompare', false) }
+			{ label: 'Diffs', kind: vscode.QuickPickItemKind.Separator },
+			{ key: 'changedLines', label: 'Changed lines', detail: 'Diff background on changed lines.', on: diffColorEnabled('changedLines') },
+			{ key: 'changedWords', label: 'Changed words', detail: 'Diff background on changed words.', on: diffColorEnabled('changedWords') },
+			setting('showSummaries', 'Summaries in diffs', 'Section summaries as comments above each section.', true),
+			setting('summariesExpanded', 'Summaries expanded', 'Expand those comments by default.', true),
+			setting('highlightSections', 'Section highlights', 'Shade the lines each section covers.', true),
+			setting('codeLens', 'Stage hunk buttons', '"Stage hunk" / "Unstage hunk" above each hunk.', true),
+			setting('plainCompare', 'Plain Old ↔ New', 'No highlights, summaries or buttons in the old/new comparison.', false),
+			setting('stageFromEditors', 'Staging in plain editors', 'Stage hunk buttons in editors of repository files too, not only in diffs.', false),
+			{ label: 'Review', kind: vscode.QuickPickItemKind.Separator },
+			setting('jumpToNextSection', 'Jump to the next section', 'After staging a section, open the next one with unstaged changes.', true),
+			setting('askForSession', 'Ask which session to fork', 'Before generating a review; otherwise the best match is used.', true)
 		];
-		const picked = await vscode.window.showQuickPick(items, { canPickMany: true, title: 'ExplainYourself display settings' });
-		if (!picked) {
+		const all = { iconPath: new vscode.ThemeIcon('settings-gear'), tooltip: 'All ExplainYourself settings: model, paths, diff algorithm…' };
+		const pick = vscode.window.createQuickPick<Item>();
+		pick.title = 'ExplainYourself settings';
+		pick.placeholder = 'Check the settings to turn on, then press Enter';
+		pick.canSelectMany = true;
+		pick.matchOnDetail = true;
+		pick.items = items;
+		pick.selectedItems = items.filter((i) => i.on);
+		pick.buttons = [all];
+		const accepted = await new Promise<boolean>((resolve) => {
+			pick.onDidAccept(() => resolve(true));
+			pick.onDidHide(() => resolve(false));
+			pick.onDidTriggerButton(() => {
+				resolve(false);
+				vscode.commands.executeCommand('workbench.action.openSettings', '@ext:markopintera.explain-yourself');
+			});
+			pick.show();
+		});
+		const selected = new Set(pick.selectedItems);
+		pick.dispose();
+		if (!accepted) {
 			return;
 		}
-		for (const item of items) {
-			const on = picked.includes(item);
-			if (on !== item.picked) {
-				await vscode.commands.executeCommand('explainYourself.setToggle', item.key, on);
-			}
+		for (const item of items.filter((i) => i.key && selected.has(i) !== i.on)) {
+			await vscode.commands.executeCommand('explainYourself.setToggle', item.key, selected.has(item));
 		}
 	});
 	register('explainYourself.setToggle', async (name: string, value: boolean) => {
-		if (name === 'plainCompare') {
-			await config().update('plainCompare', value, vscode.ConfigurationTarget.Global);
-		} else if (name === 'summaries') {
-			await config().update('showSummaries', value, vscode.ConfigurationTarget.Global);
-		} else if (name === 'changedLines' || name === 'changedWords') {
+		if (name === 'changedLines' || name === 'changedWords') {
 			await setDiffColor(name, value);
+		} else {
+			// Older names of two settings.
+			const key = name === 'summaries' ? 'showSummaries' : name;
+			await config().update(key, value, vscode.ConfigurationTarget.Global);
 		}
 	});
+	register('explainYourself.setModel', (model: string) => config().update('model', model, vscode.ConfigurationTarget.Global));
 	register('explainYourself.toggleInline', async () => {
 		const diffConfig = vscode.workspace.getConfiguration('diffEditor');
 		await diffConfig.update('renderSideBySide', !diffConfig.get('renderSideBySide', true), vscode.ConfigurationTarget.Global);

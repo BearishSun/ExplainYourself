@@ -4,11 +4,12 @@ import * as vscode from 'vscode';
 import { AgentProgress, AgentRun } from '../core/agent';
 import { LineMap } from '../core/anchors';
 import { loadFullDiff } from '../core/changes';
+import { Explanation, ExplainRequest, sectionListing } from '../core/explain';
 import { deriveOldRange, findCoverage, sectionStatus, SectionStatus, UncoveredChange } from '../core/coverage';
 import { FileDiff, LineRange } from '../core/diff';
-import { generateReview, GenerateSource } from '../core/generate';
+import { generateReview, GenerateOptions, GenerateSource } from '../core/generate';
 import { migrateRepositoryData } from '../core/legacy';
-import { adoptSnapshot, computeFingerprints, DELETED, loadReview, Review, ReviewCategory, ReviewSection, reviewDir, SectionNote } from '../core/review';
+import { adoptSnapshot, computeFingerprints, DELETED, loadReview, Review, ReviewCategory, ReviewSection, reviewDir, saveReview, SectionNote } from '../core/review';
 import { loadSubmoduleSelection, saveSubmoduleSelection, Workspace } from '../core/workspace';
 import { config, log } from './util';
 
@@ -17,11 +18,16 @@ function changeSection(change: UncoveredChange, id: string): ReviewSection {
 	return { id, file: change.file, title: `${change.file}:${change.line}`, summary: '', newRange: change.newRange, oldRange: change.oldRange };
 }
 
+/** Largest untracked file whose lines are checked for coverage one by one. */
+const UNTRACKED_TEXT_LIMIT = 2 * 1024 * 1024;
+
 export interface GenerationState {
 	log: AgentProgress[];
 	run?: AgentRun;
 	error?: string;
 	done: boolean;
+	/** Set once the first pass is shown while a follow-up pass still runs. */
+	followUp?: boolean;
 }
 
 /** Shared state: the active repository, its review, and derived review status. */
@@ -250,7 +256,7 @@ export class AppState implements vscode.Disposable {
 
 		await this.relocate([...this.snapshots.keys()]);
 		this.fullDiffs = await loadFullDiff(repo);
-		({ uncovered: this.uncovered, attached: this.attached } = findCoverage(review, this.fullDiffs, (s) => this.newRange(s)));
+		({ uncovered: this.uncovered, attached: this.attached } = findCoverage(review, this.fullDiffs, (s) => this.newRange(s), await this.untrackedText()));
 
 		const current = await computeFingerprints(repo.root, Object.keys(review.fingerprints));
 		this.staleFiles.clear();
@@ -261,6 +267,27 @@ export class AppState implements vscode.Disposable {
 			}
 		}
 		this.reviewEmitter.fire();
+	}
+
+	/** Contents of the untracked text files, for line by line coverage. Large and binary files are left out. */
+	private async untrackedText(): Promise<Map<string, string>> {
+		const repo = this.repo!;
+		const result = new Map<string, string>();
+		await Promise.all(
+			[...this.fullDiffs.values()]
+				.filter((d) => d.oldPath === null && d.hunks.length === 0 && !d.binary)
+				.map(async (d) => {
+					try {
+						const content = await fs.readFile(repo.absPath(d.path));
+						if (content.length <= UNTRACKED_TEXT_LIMIT && !content.includes(0)) {
+							result.set(d.path, content.toString('utf8'));
+						}
+					} catch {
+						// Removed since the diff was read: the next refresh drops it.
+					}
+				})
+		);
+		return result;
 	}
 
 	/** Current working tree range of a section, moved along with edits made since the review was written. */
@@ -282,6 +309,39 @@ export class AppState implements vscode.Disposable {
 	notes(section: ReviewSection): SectionNote[] {
 		const lines = this.noteLines.get(section.id);
 		return (section.notes ?? []).map((n, i) => ({ text: n.text, line: lines?.[i] ?? n.line }));
+	}
+
+	/** What the agent needs to explain a section in more detail: its current lines, notes and code with diff markers. */
+	async explainRequest(section: ReviewSection): Promise<ExplainRequest> {
+		const range = this.newRange(section);
+		const text = await this.currentText(section.file);
+		if (!range || text === null) {
+			throw new Error('The section has no code in the working tree to explain.');
+		}
+		return { section, range, notes: this.notes(section), code: sectionListing(this.fullDiffs.get(section.file), text, range) };
+	}
+
+	/**
+	 * Replaces a section's summary and notes with a more detailed explanation, whose note lines are in the
+	 * current file, and saves the review.
+	 */
+	async applyExplanation(sectionId: string, explanation: Explanation): Promise<void> {
+		const repo = this.repo;
+		const review = this.review;
+		const section = review?.categories.flatMap((c) => c.sections).find((s) => s.id === sectionId);
+		if (!repo || !review || !section) {
+			throw new Error('The review changed while the section was being explained.');
+		}
+		// The review stores note lines in the version it was written against.
+		const snapshot = this.snapshots.get(section.file);
+		const current = snapshot === undefined ? null : await this.currentText(section.file);
+		const map = snapshot !== undefined && current !== null && current !== snapshot ? LineMap.build(current, snapshot) : null;
+		section.summary = explanation.summary;
+		section.notes = explanation.notes.length > 0 ? explanation.notes.map((n) => ({ line: map ? map.line(n.line) : n.line, text: n.text })) : undefined;
+		review.source.costUsd = (review.source.costUsd ?? 0) + (explanation.costUsd ?? 0);
+		review.source.reviewSessionId ??= explanation.sessionId;
+		await saveReview(repo.gitDir, review);
+		await this.reloadReview();
 	}
 
 	/** HEAD path of a section's file (differs from the section's path after a rename), or null for new files. */
@@ -360,7 +420,7 @@ export class AppState implements vscode.Disposable {
 	}
 
 	/** Generates or updates the review. Returns true when an update found nothing to re-review. */
-	async generate(source: GenerateSource, claudePath: string): Promise<boolean> {
+	async generate(source: GenerateSource, claudePath: string, chooseSession?: GenerateOptions['chooseSession']): Promise<boolean> {
 		const repo = this.repo;
 		if (!repo || (this.generation && !this.generation.done)) {
 			return false;
@@ -381,14 +441,23 @@ export class AppState implements vscode.Disposable {
 					state.log.push(p);
 					this.generationEmitter.fire();
 				},
-				onStart: (run) => (state.run = run)
+				onStart: (run) => (state.run = run),
+				chooseSession,
+				onReview: async () => {
+					state.followUp = true;
+					await this.reloadReview();
+				}
 			});
 			upToDate = !!result.upToDate;
 			result.warnings.forEach((w) => state.log.push({ kind: 'status', message: `Warning: ${w}` }));
 			await this.reloadReview();
 		} catch (e) {
-			state.error = e instanceof Error ? e.message : String(e);
-			log(`Review generation failed: ${state.error}`);
+			const message = e instanceof Error ? e.message : String(e);
+			// Cancelling, or closing the session picker, is not a failure.
+			if (message !== 'Cancelled.') {
+				state.error = message;
+				log(`Review generation failed: ${state.error}`);
+			}
 		} finally {
 			state.done = true;
 			state.run = undefined;

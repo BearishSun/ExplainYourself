@@ -1,10 +1,11 @@
 import { existsSync, writeFileSync } from 'fs';
 import * as path from 'path';
 import { AgentProgress, AgentRun, runAgent } from './agent';
-import { buildChangeSet, ChangeSet } from './changes';
+import { addedLines, buildChangeSet, ChangeSet } from './changes';
 import { git } from './exec';
 import { snapSections } from './coverage';
-import { buildPrompt, buildUpdatePrompt, UpdatedFile, UpdateMode } from './prompt';
+import { buildCoveragePrompt, buildPrompt, buildUpdatePrompt, UpdatedFile, UpdateMode } from './prompt';
+import { coverageGaps, renderCoverage } from './repair';
 import { computeFingerprints, countFileLines, saveSnapshots, loadReview, mergeUpdate, normalizeReview, Review, reviewDir, reviewPath, saveReview, UPDATE_SCHEMA } from './review';
 import { loadGuidance } from './guidance';
 import { needsAgent, planUpdate, renderUpdate, UpdatePlan } from './update';
@@ -27,6 +28,14 @@ export interface GenerateOptions {
 	onProgress: (p: AgentProgress) => void;
 	/** Receives the running agent so the caller can cancel it. */
 	onStart?: (run: AgentRun) => void;
+	/**
+	 * Lets the user choose the session to fork, from the sessions that edited the changed files, best match
+	 * first, or a new agent. Undefined cancels the generation. Without it, the best match is forked when it
+	 * wrote some of the changed lines.
+	 */
+	chooseSession?: (candidates: SessionCandidate[]) => Promise<SessionCandidate | 'new' | undefined>;
+	/** Receives the saved review after the first pass, when a coverage pass follows, so it can be shown already. */
+	onReview?: (review: Review) => Promise<void>;
 }
 
 export interface GenerateResult {
@@ -53,15 +62,21 @@ async function saveWithSnapshot(repo: Workspace, changes: ChangeSet, review: Rev
 	await saveReview(repo.gitDir, review);
 }
 
-/** Turns raw agent output into a saved review. Throws when the output is unusable. */
-export async function finishReview(repo: Workspace, changes: ChangeSet, raw: unknown, source: Review['source']): Promise<GenerateResult> {
+/** Turns raw agent output into a review, without saving it. Throws when the output is unusable. */
+async function parseReview(repo: Workspace, changes: ChangeSet, raw: unknown, source: Review['source']): Promise<GenerateResult> {
 	const { review, errors, warnings } = await normalizeReview(raw, { head: repo.head, source, lineCount: lineCounter(repo) });
 	if (errors.length > 0) {
 		throw new Error(`The review is invalid:\n${errors.join('\n')}`);
 	}
 	warnings.push(...snapSections(review, changes.diffs));
-	await saveWithSnapshot(repo, changes, review);
 	return { review, warnings };
+}
+
+/** Turns raw agent output into a saved review. Throws when the output is unusable. */
+export async function finishReview(repo: Workspace, changes: ChangeSet, raw: unknown, source: Review['source']): Promise<GenerateResult> {
+	const result = await parseReview(repo, changes, raw, source);
+	await saveWithSnapshot(repo, changes, result.review);
+	return result;
 }
 
 /** Merges raw update output into the planned base review and saves it. Throws when the output is unusable. */
@@ -146,9 +161,18 @@ export async function generateReview(repo: Workspace, options: GenerateOptions):
 		session = options.source.session;
 	} else {
 		options.onProgress({ kind: 'status', message: 'Searching recent Claude sessions…' });
-		candidates = await findSessions(repo.root, changes.files.map((f) => f.path), options.sessionMaxAgeDays);
-		if (options.source.kind !== 'fresh' && candidates[0]?.cwd && existsSync(candidates[0].cwd)) {
-			session = candidates[0];
+		candidates = await findSessions(repo.root, changes.files.map((f) => f.path), options.sessionMaxAgeDays, addedLines(changes));
+		// Only sessions that can be resumed, from their original directory, can be forked.
+		const forkable = candidates.filter((c) => c.cwd && existsSync(c.cwd));
+		if (options.source.kind !== 'fresh' && options.chooseSession && forkable.length > 0) {
+			const choice = await options.chooseSession(forkable);
+			if (!choice) {
+				throw new Error('Cancelled.');
+			}
+			session = choice === 'new' ? undefined : choice;
+		} else if (options.source.kind !== 'fresh' && forkable[0]?.writtenLines > 0) {
+			// Automatically, only a session that wrote some of the uncommitted code.
+			session = forkable[0];
 		}
 	}
 
@@ -174,7 +198,7 @@ export async function generateReview(repo: Workspace, options: GenerateOptions):
 	const result = await run.result;
 
 	options.onProgress({ kind: 'status', message: 'Validating review…' });
-	return finishReview(repo, changes, result.output, {
+	const parsed = await parseReview(repo, changes, result.output, {
 		kind: session ? 'session' : 'fresh',
 		sessionId: session?.sessionId,
 		reviewSessionId: result.sessionId,
@@ -182,6 +206,72 @@ export async function generateReview(repo: Workspace, options: GenerateOptions):
 		model: result.model ?? options.model,
 		costUsd: result.costUsd
 	});
+	await saveWithSnapshot(repo, changes, parsed.review);
+	if (coverageGaps(parsed.review, changes).length === 0) {
+		return parsed;
+	}
+
+	// The reviewer can start on the first pass while the review session covers what it missed.
+	await options.onReview?.(parsed.review);
+	const repaired = await repairCoverage(repo, changes, parsed, options);
+	if (repaired.review !== parsed.review) {
+		// Positions are in the files as of the first pass; its snapshot moves them along with later edits.
+		await saveReview(repo.gitDir, repaired.review);
+	}
+	return repaired;
+}
+
+/**
+ * Checks that the sections of a new review cover every changed line. When some do not, the review session
+ * continues with only the uncovered lines, and adds or extends sections for them. Once: lines still uncovered
+ * after that are left to the reviewer. A failed pass keeps the review as it is.
+ */
+export async function repairCoverage(repo: Workspace, changes: ChangeSet, parsed: GenerateResult, options: GenerateOptions): Promise<GenerateResult> {
+	const { review, warnings } = parsed;
+	const gaps = coverageGaps(review, changes);
+	const source = review.source;
+	if (gaps.length === 0 || !source.reviewSessionId || !source.reviewCwd) {
+		return parsed;
+	}
+
+	const files = new Set(gaps.map((g) => g.file)).size;
+	options.onProgress({ kind: 'status', message: `Covering ${gaps.length} change(s) the review missed, in ${files} file(s)…` });
+	const coverageFile = path.join(reviewDir(repo.gitDir), 'coverage.md');
+	writeFileSync(coverageFile, renderCoverage(review, gaps, changes));
+	try {
+		const agent = runAgent({
+			claudePath: options.claudePath,
+			cwd: source.reviewCwd,
+			repoRoot: repo.root,
+			prompt: buildCoveragePrompt(coverageFile),
+			model: options.model,
+			resumeSessionId: source.reviewSessionId,
+			schema: UPDATE_SCHEMA,
+			onProgress: options.onProgress
+		});
+		options.onStart?.(agent);
+		const result = await agent.result;
+
+		options.onProgress({ kind: 'status', message: 'Merging the new sections…' });
+		// Invalid entries are skipped; the lines they were meant to cover stay listed as uncovered.
+		const merged = await mergeUpdate(review, result.output, new Set(), { head: repo.head, source, lineCount: lineCounter(repo) });
+		merged.review.updatedAt = review.updatedAt;
+		merged.review.source = {
+			...source,
+			reviewSessionId: result.sessionId ?? source.reviewSessionId,
+			model: result.model ?? source.model,
+			costUsd: (source.costUsd ?? 0) + (result.costUsd ?? 0)
+		};
+		warnings.push(...merged.errors, ...merged.warnings, ...snapSections(merged.review, changes.diffs));
+		const left = coverageGaps(merged.review, changes).length;
+		if (left > 0) {
+			warnings.push(`${left} change(s) still have no section; they are listed under "Not covered by the review".`);
+		}
+		return { review: merged.review, warnings };
+	} catch (e) {
+		const reason = e instanceof Error ? e.message : String(e);
+		return { review, warnings: [...warnings, `Covering the changes without a section failed (${reason}); the review is saved without them.`] };
+	}
 }
 
 /**

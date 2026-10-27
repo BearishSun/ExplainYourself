@@ -51,11 +51,18 @@ button.small { padding: 0 6px; font-size: 0.9em; }
 .submodules { margin: 6px 0 2px; padding: 6px 8px; border: 1px solid var(--vscode-panel-border); border-radius: 3px; }
 .submodules label.sub { display: flex; align-items: center; gap: 6px; padding: 2px 0; cursor: pointer; }
 .submodules input { margin: 0; }
+.model-row { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.model-row select { flex: 1; max-width: 220px; background: var(--vscode-dropdown-background); color: var(--vscode-dropdown-foreground); border: 1px solid var(--vscode-dropdown-border, transparent); padding: 2px 4px; }
 .sub-summary { margin-top: 4px; }
 
 .generation { border: 1px solid var(--vscode-panel-border); padding: 6px; margin: 6px 0; border-radius: 3px; }
 .generation.error { border-color: var(--vscode-inputValidation-errorBorder); }
 .gen-title { display: flex; align-items: center; gap: 6px; font-weight: bold; }
+/* A pass that runs while the review is already shown: one line, the log on expand. */
+.generation.follow-up { padding: 4px 6px; }
+.follow-up .gen-title { font-weight: normal; cursor: pointer; list-style: none; }
+.follow-up .gen-title::-webkit-details-marker { display: none; }
+.follow-up-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .log { max-height: 180px; overflow-y: auto; font-family: var(--vscode-editor-font-family); font-size: 0.85em; margin-top: 4px; }
 .log-tool { color: var(--vscode-descriptionForeground); }
 .log-status { color: var(--vscode-textLink-foreground); }
@@ -193,7 +200,13 @@ details.category.done .cat-title { color: var(--vscode-descriptionForeground); t
 .sq.size-high { --sq-color: var(--size-high); }
 .sq.size-huge { --sq-color: var(--size-huge); }
 .summary { margin-top: 2px; }
-.related { margin-top: 2px; }
+/* Related sections: one line, with a toggle to show the whole list when it does not fit. */
+.related { margin-top: 2px; display: flex; align-items: baseline; gap: 6px; }
+.related-items { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.related.expanded .related-items { white-space: normal; }
+.related-items a { white-space: nowrap; }
+.related-toggle { flex-shrink: 0; cursor: pointer; }
+.related-toggle[hidden] { display: none; }
 .uncovered > div { margin: 2px 0; }
 .badge { font-size: 0.8em; padding: 0 5px; border-radius: 8px; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); }
 .views { float: right; }

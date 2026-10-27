@@ -71,6 +71,15 @@
 		'<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="currentColor" fill-rule="evenodd" d="M7.13 1.5a1 1 0 0 1 1.74 0l6.5 11.5A1 1 0 0 1 14.5 14.5h-13a1 1 0 0 1-.87-1.5zM8 5a.75.75 0 0 0-.75.75v3.5a.75.75 0 0 0 1.5 0v-3.5A.75.75 0 0 0 8 5zm0 7.5a.9.9 0 1 0 0-1.8.9.9 0 0 0 0 1.8z"/></svg>';
 
 	/** "claude-sonnet-5-5" or "claude-opus-4-1-20250805" -> "Sonnet 5.5" / "Opus 4.1"; other names stay as they are. */
+	/** Models offered for the review, as [id, name]; an empty id leaves the choice to Claude Code. */
+	const MODELS = [
+		['claude-sonnet-5-5', 'Sonnet 5.5'],
+		['claude-opus-5-5', 'Opus 5.5'],
+		['claude-fable-5-1', 'Fable 5.1'],
+		['claude-haiku-5-5', 'Haiku 5.5'],
+		['', 'Claude Code default']
+	];
+
 	function modelName(id) {
 		const m = /^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?$/.exec(id);
 		return m ? `${m[1][0].toUpperCase()}${m[1].slice(1)} ${m[2]}${m[3] ? `.${m[3]}` : ''}` : id;
@@ -122,26 +131,32 @@
 			stripLabel.innerHTML = `<span>${r.staged} of ${r.total} sections reviewed</span><span class="pct">${Math.floor((100 * r.staged) / r.total)}%</span>`;
 		}
 
-		// Submodules: a ▾ next to the main button opens a checklist of the ones to review.
+		// Review options: a ▾ next to the main button opens the model choice and a checklist of the submodules to review.
 		const subs = s.repo.submodules ?? [];
 		const chosen = subs.filter((m) => m.selected);
-		const arrow = subs.length
-			? `<button class="arrow ${subsOpen ? 'open' : ''}" data-toggle-subs title="Choose the submodules to review${chosen.length ? ` (${chosen.length} selected)` : ''}">▾</button>`
-			: '';
-		const subList = subsOpen && subs.length
+		const model = s.model ?? '';
+		const models = MODELS.some(([id]) => id === model) ? MODELS : [...MODELS, [model, modelName(model)]];
+		const arrow = `<button class="arrow ${subsOpen ? 'open' : ''}" data-toggle-subs title="Model${subs.length ? ' and submodules' : ''} for the review">▾</button>`;
+		const subList = subsOpen
 			? `<div class="submodules">
-				<div class="muted small">Submodules to include in the review:</div>
+				<label class="model-row"><span class="muted small">Model</span>
+					<select data-model ${running ? 'disabled' : ''} title="Model for generating, updating and explaining the review">
+						${models.map(([id, name]) => `<option value="${esc(id)}" ${id === model ? 'selected' : ''}>${esc(name)}</option>`).join('')}
+					</select></label>
+				${
+					subs.length
+						? `<div class="muted small">Submodules to include in the review:</div>
 				${subs
 					.map(
 						(m) => `<label class="sub ${m.initialized ? '' : 'muted'}" title="${m.initialized ? esc(m.path) : 'Not initialized: run git submodule update --init'}">
 					<input type="checkbox" data-sub="${esc(m.path)}" ${m.selected ? 'checked' : ''} ${!m.initialized || running ? 'disabled' : ''}>
 					<span>${esc(m.path)}</span>${m.changed ? ' <span class="badge">changed</span>' : ''}${m.initialized ? '' : ' <span class="small">(not initialized)</span>'}</label>`
 					)
-					.join('')}
+					.join('')}`
+						: ''
+				}
 			</div>`
-			: chosen.length
-				? `<div class="muted small sub-summary">Includes ${chosen.map((m) => esc(m.path)).join(', ')}</div>`
-				: '';
+			: `<div class="muted small sub-summary">${esc(model ? modelName(model) : 'Claude Code default model')}${chosen.length ? ` · includes ${chosen.map((m) => esc(m.path)).join(', ')}` : ''}</div>`;
 
 		parts.push(`<div class="header">
 			<div class="repo" title="${esc(s.repo.root)}"><b>${esc(s.repo.name)}</b> ${s.repo.branch ? `<span class="muted">on ${esc(s.repo.branch)}</span>` : ''}</div>
@@ -151,14 +166,21 @@
 					r
 						? `<span class="split"><button data-cmd="explainYourself.updateReview" ${running ? 'disabled' : ''} title="Re-review only the files that changed since the review, continuing the review session">Update review</button>${arrow}</span>
 				<button class="secondary" data-cmd="explainYourself.generate" ${running ? 'disabled' : ''} title="Review the whole change set again from scratch">Full regenerate</button>`
-						: `<span class="split"><button data-cmd="explainYourself.generate" ${running ? 'disabled' : ''} title="Fork the Claude session that wrote the changes when one is found; otherwise start a new agent">Generate review</button>${arrow}</span>`
+						: `<span class="split"><button data-cmd="explainYourself.generate" ${running ? 'disabled' : ''} title="Choose the Claude session that wrote the changes to fork, or a new agent, to write the review">Generate review</button>${arrow}</span>`
 				}
 			</div>
 			${subList}
 		</div>`);
 
 		const g = s.generation;
-		if (g && (g.running || g.error)) {
+		if (g && g.running && g.followUp) {
+			// The first pass is shown below; a slim bar reports the pass that still runs.
+			const last = g.log.filter((l) => l.kind === 'status').pop();
+			const log = g.log.map((l) => `<div class="log-${l.kind}">${esc(l.message.length > 300 ? l.message.slice(0, 300) + '…' : l.message)}</div>`).join('');
+			parts.push(`<details class="generation follow-up" ${followUpOpen ? 'open' : ''}><summary class="gen-title"><span class="spinner"></span> <span class="follow-up-text">${esc(last ? last.message : 'Working on the review…')}</span>
+				<button class="secondary small" data-cmd="explainYourself.cancelGeneration" title="Stop the pass; the review keeps what it has">Cancel</button></summary>
+				<div class="log">${log}</div></details>`);
+		} else if (g && (g.running || g.error)) {
 			const log = g.log.map((l) => `<div class="log-${l.kind}">${esc(l.message.length > 300 ? l.message.slice(0, 300) + '…' : l.message)}</div>`).join('');
 			parts.push(`<div class="generation ${g.error ? 'error' : ''}">
 				<div class="gen-title">${g.running ? '<span class="spinner"></span> Working on the review…' : 'Review generation failed'}
@@ -198,7 +220,7 @@
 								sec.nearby ? ` <span class="nearby" title="Whitespace changes and changes next to this section. Staging the section stages them too.">+${sec.nearby} nearby</span>` : ''}
 							${sec.comparable ? `<span class="views"><a data-open-diff="${sec.id}" title="Open as a diff">Diff</a> · <a data-compare="${sec.id}" title="Old and new versions side by side, without diff markup">Old ↔ New</a></span>` : ''}</div>
 						<div class="summary">${md(sec.summary)}</div>
-						${sec.related.length ? `<div class="related small muted">Related: ${sec.related.map((x) => `<a data-open="${x.id}" title="Open the related section">${esc(x.file.split('/').pop())}${x.lines ? `:${esc(x.lines)}` : ''}</a>`).join(' · ')}</div>` : ''}
+						${sec.related.length ? relatedList(sec) : ''}
 					</div>`
 					)
 					.join('');
@@ -226,6 +248,7 @@
 		root.innerHTML = parts.join('');
 		bind();
 		layoutSquares();
+		fitRelated();
 		scroller().scrollTop = scrollTop;
 
 		if (revealId) {
@@ -273,6 +296,7 @@
 			target.addEventListener('mouseleave', hideConcerns);
 			target.addEventListener('blur', hideConcerns);
 		});
+		root.querySelector('.follow-up')?.addEventListener('toggle', (e) => (followUpOpen = /** @type {HTMLDetailsElement} */ (e.target).open));
 		root.querySelectorAll('[data-cmd]').forEach((b) =>
 			b.addEventListener('click', (e) => {
 				e.preventDefault();
@@ -285,6 +309,7 @@
 				render();
 			})
 		);
+		root.querySelector('[data-model]')?.addEventListener('change', (e) => run('explainYourself.setModel', /** @type {HTMLSelectElement} */ (e.target).value));
 		root.querySelectorAll('[data-sub]').forEach((b) =>
 			b.addEventListener('change', () => {
 				const paths = [...root.querySelectorAll('[data-sub]')]
@@ -304,6 +329,22 @@
 				}
 			})
 		);
+		root.querySelectorAll('.related-toggle').forEach((t) => {
+			const toggle = () => {
+				const list = /** @type {HTMLElement} */ (t.closest('.related'));
+				const id = list.dataset.related;
+				const expanded = list.classList.toggle('expanded');
+				if (expanded) {
+					expandedRelated.add(id);
+				} else {
+					expandedRelated.delete(id);
+				}
+				t.textContent = expanded ? 'less' : `all ${list.querySelectorAll('[data-open]').length}`;
+				fitRelated();
+			};
+			t.addEventListener('click', toggle);
+			t.addEventListener('keydown', (e) => (/** @type {KeyboardEvent} */ (e).key === 'Enter' || /** @type {KeyboardEvent} */ (e).key === ' ') && (e.preventDefault(), toggle()));
+		});
 		root.querySelectorAll('[data-open-diff]').forEach((b) =>
 			b.addEventListener('click', (e) => {
 				e.preventDefault();
@@ -450,6 +491,39 @@
 		});
 	}
 
+	/** Whether the user expanded the log of a follow-up pass; kept across re-renders. */
+	let followUpOpen = false;
+
+	/** Sections whose related list the user expanded; kept across re-renders. */
+	const expandedRelated = new Set();
+
+	/**
+	 * Links to the related sections of a section: file names, with the full path in the tooltip. The list
+	 * stays on one line; when it does not fit, a toggle expands it.
+	 */
+	function relatedList(sec) {
+		const links = sec.related
+			.map((x) => {
+				const where = `${x.file}${x.lines ? `:${x.lines}` : ''}`;
+				return `<a data-open="${x.id}" title="${esc(where)}">${esc(x.file.split('/').pop())}${x.lines ? `:${esc(x.lines)}` : ''}</a>`;
+			})
+			.join(' · ');
+		const expanded = expandedRelated.has(sec.id);
+		return `<div class="related small muted${expanded ? ' expanded' : ''}" data-related="${sec.id}"><span class="related-items">Related: ${links}</span><a class="related-toggle" role="button" tabindex="0" ${expanded ? '' : 'hidden'}>${expanded ? 'less' : `all ${sec.related.length}`}</a></div>`;
+	}
+
+	/** Shows the toggle of each collapsed related list that does not fit on one line. */
+	function fitRelated() {
+		root.querySelectorAll('.related:not(.expanded)').forEach((el) => {
+			const items = /** @type {HTMLElement} */ (el.querySelector('.related-items'));
+			const toggle = /** @type {HTMLElement} */ (el.querySelector('.related-toggle'));
+			// Lists in closed categories have no width yet; they are measured when the category opens.
+			if (items.clientWidth > 0) {
+				toggle.hidden = items.scrollWidth <= items.clientWidth + 1;
+			}
+		});
+	}
+
 	/** Expands a section's category, scrolls its card into view and flashes it. */
 	function showCard(id) {
 		const card = root.querySelector(`[data-section="${id}"]`);
@@ -463,6 +537,9 @@
 	}
 
 	new ResizeObserver(() => layoutSquares()).observe(strip);
+	new ResizeObserver(() => fitRelated()).observe(root);
+	// Opening a category lays out its related lists; toggle does not bubble, so listen while capturing.
+	root.addEventListener('toggle', () => fitRelated(), true);
 
 	window.addEventListener('message', (e) => {
 		const m = e.data;

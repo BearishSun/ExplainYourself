@@ -17,6 +17,8 @@ import { buildPrompt } from '../core/prompt';
 import { findSessions, REVIEW_PROMPT_START, REVIEW_SESSION_NAME } from '../core/sessions';
 import { adoptSnapshot, computeFingerprints, loadReview, loadSnapshot, mergeUpdate, normalizeReview, Review, saveReview, saveSnapshots } from '../core/review';
 import { Workspace } from '../core/workspace';
+import { coverageGaps, renderCoverage } from '../core/repair';
+import { parseExplanation, sectionListing } from '../core/explain';
 import { applyForward, applyReverse, selectHunks, selectLines, selectSections, withAdjacentBlankLines } from '../core/stager';
 
 function sh(cwd: string, ...args: string[]): string {
@@ -637,6 +639,54 @@ test('findCoverage: cut-off hunk lines and whitespace go to the nearest section,
 	assert.deepStrictEqual(uncovered.map((c) => c.newRange), [{ start: 60, end: 61 }]);
 });
 
+test('findCoverage: untracked files are checked line by line, and large blocks next to a section stay uncovered', () => {
+	// A new file: a section covers lines 1-3, a function the review missed follows at 4-12, a section covers 13-14.
+	const text = ['#include "a.h"', 'int x;', '', 'void f()', '{', '\ta();', '\tb();', '\tc();', '\td();', '\te();', '}', '', 'int y;', 'int z;', ''].join('\r\n');
+	const diff = { oldPath: null, newPath: 'n.cpp', path: 'n.cpp', binary: false, hunks: [] };
+	const sections = [
+		{ id: 'a', file: 'n.cpp', title: 'A', summary: '', newRange: { start: 1, end: 3 } },
+		{ id: 'b', file: 'n.cpp', title: 'B', summary: '', newRange: { start: 13, end: 14 } }
+	];
+	const review = { categories: [{ id: 'c', title: 'C', oldBehavior: '', newBehavior: '', sections }] } as unknown as Review;
+	const { uncovered, attached } = findCoverage(review, new Map([['n.cpp', diff]]), (x) => x.newRange, new Map([['n.cpp', text]]));
+	assert.deepStrictEqual(uncovered.map((c) => [c.newRange, c.added]), [[{ start: 4, end: 12 }, 9]]);
+	assert.strictEqual(attached.size, 0);
+
+	// Without the text, any section of the file covers it.
+	assert.deepStrictEqual(findCoverage(review, new Map([['n.cpp', diff]]), (x) => x.newRange).uncovered, []);
+});
+
+test('coverage repair: lists only the uncovered lines, and merges extended and added sections', async () => {
+	const fn = (name: string) => [`void ${name}()`, '{', '\ta();', '\tb();', '\tc();', '\td();', '\te();', '\tf();', '}', ''];
+	const dir = makeRepo({ 'a.cpp': 'int x;\n' });
+	fs.writeFileSync(path.join(dir, 'a.cpp'), ['int y;', '', ...fn('first'), ...fn('second')].join('\n'));
+	fs.writeFileSync(path.join(dir, 'new.cpp'), 'int z;\n');
+	const repo = await Workspace.open(dir);
+	const changes = await buildChangeSet(repo);
+	// The review misses the body of first() and all of new.cpp; second() is covered.
+	const sections = [
+		{ id: 'c1s1', file: 'a.cpp', title: 'first', summary: 'First.', newRange: { start: 1, end: 3 } },
+		{ id: 'c1s2', file: 'a.cpp', title: 'second', summary: 'Second.', newRange: { start: 13, end: 21 } }
+	];
+	const review = { head: '', title: 'T', overview: '', source: { kind: 'fresh' }, fingerprints: {}, categories: [{ id: 'c1', title: 'C', oldBehavior: 'o', newBehavior: 'n', sections }] } as unknown as Review;
+
+	const gaps = coverageGaps(review, changes);
+	assert.deepStrictEqual(gaps.map((g) => [g.file, g.newRange]), [['a.cpp', { start: 4, end: 12 }], ['new.cpp', { start: 1, end: 1 }]]);
+	const text = renderCoverage(review, gaps, changes);
+	assert.ok(text.includes('- c1: "C"') && text.includes('- c1s1 in category c1: "first", lines 1-3') && text.includes('Not covered: lines 4-12 (+9 -0)'));
+	assert.ok(text.includes('     5 +| \ta();') && !text.includes('second()'), 'only the uncovered lines are shown');
+
+	const output = { categories: [{ id: 'c1', sections: [{ id: 'c1s1', newStart: 1, newEnd: 11 }, { file: 'new.cpp', title: 'z', summary: 'Z.', newStart: 1, newEnd: 1 }] }] };
+	const merged = await mergeUpdate(review, output, new Set(), { head: '', source: review.source, lineCount: async () => 30 });
+	assert.deepStrictEqual(merged.errors, []);
+	assert.deepStrictEqual(merged.review.categories[0].sections.map((s) => [s.id, s.newRange, s.summary]), [
+		['c1s1', { start: 1, end: 11 }, 'First.'],
+		['c1s2', { start: 13, end: 21 }, 'Second.'],
+		['c1s3', { start: 1, end: 1 }, 'Z.']
+	]);
+	assert.deepStrictEqual(coverageGaps(merged.review, changes), []);
+});
+
 test('staging a section with a nearby change leaves the next section unstaged', async () => {
 	const dir = makeRepo({ 'f.cpp': lines('void a()', '{', '\told();', '}', 'end') });
 	// One block: a()'s body and closing line change, and b() follows right after.
@@ -689,6 +739,78 @@ test('findSessions leaves out review sessions, but not coding sessions that ran 
 			process.env.CLAUDE_CONFIG_DIR = previous;
 		}
 	}
+});
+
+test('findSessions ranks sessions by the uncommitted lines they wrote, also through drafts, scripts and subagents', async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), 'explainyourself-repo-'));
+	const config = fs.mkdtempSync(path.join(os.tmpdir(), 'explainyourself-claude-'));
+	const project = path.join(config, 'projects', 'p');
+	fs.mkdirSync(project, { recursive: true });
+	const at = (iso: string) => ({ parentUuid: null, type: 'assistant', timestamp: iso });
+	const tool = (iso: string, name: string, input: Record<string, unknown>) => JSON.stringify({ ...at(iso), message: { content: [{ type: 'tool_use', name, input }] } });
+	const user = JSON.stringify({ type: 'user', cwd: root, message: { content: [{ type: 'text', text: 'Work' }] } });
+	const file = path.join(root, 'src', 'stream.cpp');
+	const code = ['void Stream::Open(const char* name)', '{', '\tmHandle = OpenStreamHandle(name);', '\tmOpen = true;', '}'];
+	const added = new Map([['src/stream.cpp', new Set(code.map((l) => l.trim()).filter((l) => l.length >= 4))]]);
+
+	const transcripts: Record<string, string[]> = {
+		// Edited the file often, long ago: none of what it wrote is still uncommitted.
+		old: [user, ...Array.from({ length: 5 }, () => tool('2026-01-01T00:00:00Z', 'Edit', { file_path: file, new_string: 'int old = 0;' }))],
+		// Wrote the code in place.
+		direct: [user, tool('2026-01-02T00:00:00Z', 'Write', { file_path: file, content: code.join('\n') })],
+		// Wrote a script that generates the code, and ran it.
+		script: [user, tool('2026-01-03T00:00:00Z', 'Write', { file_path: path.join(config, 'gen.py'), content: `src = """\n${code[0]}\n${code[2]}\n"""` })],
+		// Wrote a draft elsewhere with the same name; unrelated files of that name do not count.
+		draft: [
+			user,
+			tool('2026-01-04T00:00:00Z', 'Write', { file_path: path.join(config, 'drafts', 'stream.cpp'), content: code[0] }),
+			tool('2026-01-04T00:00:00Z', 'Write', { file_path: path.join(config, 'other', 'stream.cpp'), content: 'int unrelated;' })
+		],
+		// Delegated the edit to a subagent.
+		parent: [user]
+	};
+	for (const [name, lines] of Object.entries(transcripts)) {
+		fs.writeFileSync(path.join(project, `${name}.jsonl`), lines.join('\n') + '\n');
+	}
+	fs.mkdirSync(path.join(project, 'parent', 'subagents'), { recursive: true });
+	fs.writeFileSync(path.join(project, 'parent', 'subagents', 'agent-1.jsonl'), tool('2026-01-05T00:00:00Z', 'Edit', { file_path: file, new_string: code[2] }) + '\n');
+
+	const previous = process.env.CLAUDE_CONFIG_DIR;
+	process.env.CLAUDE_CONFIG_DIR = config;
+	try {
+		const sessions = await findSessions(root, ['src/stream.cpp'], 1, added);
+		assert.deepStrictEqual(
+			sessions.map((s) => [s.sessionId, s.writtenLines]),
+			[['direct', 3], ['script', 2], ['parent', 1], ['draft', 1], ['old', 0]]
+		);
+		assert.strictEqual(sessions.find((s) => s.sessionId === 'draft')!.editedFiles['src/stream.cpp'], 1);
+		assert.strictEqual(sessions.find((s) => s.sessionId === 'parent')!.lastEdit!.toISOString(), '2026-01-05T00:00:00.000Z');
+	} finally {
+		if (previous === undefined) {
+			delete process.env.CLAUDE_CONFIG_DIR;
+		} else {
+			process.env.CLAUDE_CONFIG_DIR = previous;
+		}
+	}
+});
+
+test('explain: the section listing marks added and removed lines; the output keeps notes inside the section', () => {
+	// Line 2 replaced, line 4 added, old line 5 removed after line 5.
+	const [d] = parseDiff('diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -2 +2 @@\n-old two\n+two\n@@ -3,0 +4 @@\n+four\n@@ -5 +5,0 @@\n-old five\n');
+	const code = sectionListing(d, 'one\ntwo\nthree\nfour\nfive\nsix\n', { start: 1, end: 6 });
+	assert.deepStrictEqual(
+		code.map((l) => `${l.line ?? '-'}${l.marker}${l.text}`),
+		['1 one', '--old two', '2+two', '3 three', '4+four', '5 five', '--old five', '6 six']
+	);
+	const untracked = sectionListing({ oldPath: null, newPath: 'n', path: 'n', binary: false, hunks: [] }, 'a\nb\n', { start: 1, end: 2 });
+	assert.deepStrictEqual(untracked.map((l) => l.marker), ['+', '+']);
+
+	const parsed = parseExplanation(
+		{ summary: ' Does a thing. ', notes: [{ line: 9, text: 'Second.' }, { line: 3, text: 'First.' }, { line: 3, text: 'Duplicate.' }, { line: 40, text: 'Outside.' }, { line: 5, text: ' ' }] },
+		{ start: 2, end: 20 }
+	);
+	assert.deepStrictEqual(parsed, { summary: 'Does a thing.', notes: [{ line: 3, text: 'First.' }, { line: 9, text: 'Second.' }] });
+	assert.throws(() => parseExplanation({ summary: '', notes: [] }, { start: 1, end: 2 }));
 });
 
 test('snapSections moves section edges out to their block of added lines, but not past other sections or code', () => {

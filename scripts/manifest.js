@@ -41,6 +41,7 @@ pkg.contributes = {
 		cmd('explainYourself.stageUncovered', 'Stage Changes Not Covered by the Review'),
 		cmd('explainYourself.stageSection', 'Stage Section', 'check'),
 		cmd('explainYourself.revealSection', 'Show in Review Panel', 'list-tree'),
+		cmd('explainYourself.explainSection', 'Explain in More Detail', 'question'),
 		cmd('explainYourself.toggleInline', 'Toggle Inline / Side-by-Side Diff', 'split-horizontal'),
 		cmd('explainYourself.compareSection', 'Compare Old ↔ New', 'versions'),
 		cmd('explainYourself.compareAtCursor', 'Compare Old ↔ New Version of the Section at the Cursor', 'versions'),
@@ -55,10 +56,11 @@ pkg.contributes = {
 		cmd('explainYourself.stageHunk', 'Stage Hunk'),
 		cmd('explainYourself.unstageHunk', 'Unstage Hunk'),
 		cmd('explainYourself.stageCategory', 'Stage Category'),
-		cmd('explainYourself.setToggle', 'Set Highlight Toggle')
+		cmd('explainYourself.setToggle', 'Set Highlight Toggle'),
+		cmd('explainYourself.setModel', 'Set Review Model')
 	],
 	menus: {
-		commandPalette: ['generateFromSession', 'generateFresh', 'useInSession', 'compareSection', 'openSection','openDiff', 'openDiffAt', 'stageHunk', 'unstageHunk', 'stageCategory', 'setToggle', 'stageSection', 'revealSection', 'stageFile', 'unstageFile', 'setSubmodules'].map(
+		commandPalette: ['generateFromSession', 'generateFresh', 'useInSession', 'compareSection', 'openSection','openDiff', 'openDiffAt', 'stageHunk', 'unstageHunk', 'stageCategory', 'setToggle', 'setModel', 'stageSection', 'revealSection', 'explainSection', 'stageFile', 'unstageFile', 'setSubmodules'].map(
 			(c) => ({ command: `explainYourself.${c}`, when: 'false' })
 		),
 		'view/title': [
@@ -95,7 +97,8 @@ pkg.contributes = {
 			{ command: 'explainYourself.stageSection', when: 'commentController == explainYourself && commentThread != explainYourselfNote', group: 'inline@1' },
 			{ command: 'explainYourself.compareSection', when: 'commentController == explainYourself && commentThread != explainYourselfNote', group: 'inline@2' },
 			{ command: 'explainYourself.goToRelated', when: 'commentController == explainYourself && commentThread == explainYourselfGrouped', group: 'inline@3' },
-			{ command: 'explainYourself.revealSection', when: 'commentController == explainYourself && commentThread != explainYourselfNote', group: 'inline@4' }
+			{ command: 'explainYourself.revealSection', when: 'commentController == explainYourself && commentThread != explainYourselfNote', group: 'inline@4' },
+			{ command: 'explainYourself.explainSection', when: 'commentController == explainYourself && commentThread != explainYourselfNote', group: 'inline@5' }
 		]
 	},
 	keybindings: [
@@ -123,6 +126,7 @@ pkg.contributes = {
 			'explainYourself.gitPath': { type: 'string', default: '', description: 'Path to the git executable. Empty: use git from PATH.' },
 			'explainYourself.model': { type: 'string', default: 'claude-sonnet-5-5', description: 'Model for review generation and updates, for example "claude-sonnet-5-5", "sonnet" or "opus". Empty: the Claude Code default.' },
 			'explainYourself.sessionSearchDays': { type: 'number', default: 14, description: 'How many days of Claude Code session transcripts to search for the session that wrote the changes.' },
+			'explainYourself.askForSession': { type: 'boolean', default: true, description: 'Before generating a review, choose which Claude session to fork, or a new agent. The sessions that wrote the most of the uncommitted lines come first. When off, that session is forked without asking, or a new agent starts when no session wrote any of them.' },
 			'explainYourself.diffAlgorithm': { type: 'string', enum: ['histogram', 'patience', 'myers', 'minimal'], default: 'histogram', description: 'Diff algorithm used to compute hunks.' },
 			'explainYourself.showSummaries': { type: 'boolean', default: true, description: 'Show section summaries inline in diffs.' },
 			'explainYourself.summariesExpanded': { type: 'boolean', default: true, description: 'Expand inline section summaries by default.' },
